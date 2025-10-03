@@ -1,0 +1,25 @@
+{
+    "name": "@kithinji/origami",
+    "version": "1.0.0",
+    "main": "dist/main.js",
+    "module": "dist/main.js",
+    "types": "dist/main.d.ts",
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "clean": "rimraf dist",
+        "build": "npm run clean && tsc",
+        "build:watch": "npm run clean && tsc -w",
+        "type-check": "tsc --noEmit",
+        "type-check:watch": "tsc --noEmit -w"
+    },
+    "dependencies": {
+        "reflect-metadata": "^0.2.2"
+    },
+    "devDependencies": {
+        "@types/reflect-metadata": "^0.0.5",
+        "rimraf": "^5.0.0",
+        "typescript": "^5.3.3"
+    }
+}
