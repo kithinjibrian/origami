@@ -5,8 +5,6 @@ interface ColumnParams {
 }
 
 export class Column extends ImmutableWidget {
-    private childContext?: BuildContext;
-
     constructor(
         private children: Widget[],
         { key }: ColumnParams = {}
@@ -19,30 +17,16 @@ export class Column extends ImmutableWidget {
     }
 
     render(context: BuildContext): HTMLElement {
-        if (this.childContext) {
-            this.childContext.dispose();
-        }
-
-        this.childContext = new BuildContext(this, context);
-        context.addDisposable(() => this.childContext);
+        const widgetContext = new BuildContext(this, context);
 
         const div = document.createElement('div');
         div.style.display = 'flex';
         div.style.flexDirection = 'column';
 
         this.children.forEach(child => {
-            div.appendChild(child.render(this.childContext));
+            div.appendChild(child.render(widgetContext));
         });
 
         return this.setElement(div);
-    }
-
-    dispose(): void {
-        super.dispose();
-        if (this.childContext) {
-            this.childContext.dispose();
-        }
-
-        this.children.forEach(ch => ch.dispose())
     }
 }

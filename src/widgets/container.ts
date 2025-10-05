@@ -1,5 +1,5 @@
 import { Color, EdgeInsets } from "../painting/__init__";
-import { DataWidget, Widget } from "./framework";
+import { BuildContext, ImmutableWidget, Widget } from "./framework";
 
 interface ContainerParams {
     key?: string;
@@ -8,7 +8,7 @@ interface ContainerParams {
     color?: Color;
 }
 
-export class Container extends DataWidget {
+export class Container extends ImmutableWidget {
     margin?: EdgeInsets;
     padding?: EdgeInsets;
     color?: Color;
@@ -32,7 +32,10 @@ export class Container extends DataWidget {
         return this;
     }
 
-    render(): HTMLElement {
+    render(context: BuildContext): HTMLElement {
+        const widgetContext = new BuildContext(this, context);
+
+
         const div = document.createElement('div');
 
         if (this.margin) {
@@ -53,7 +56,7 @@ export class Container extends DataWidget {
             div.style.backgroundColor = this.color.toString();
         }
 
-        div.appendChild(this.child.render());
+        div.appendChild(this.child.render(widgetContext));
 
         return div;
     }

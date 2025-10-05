@@ -1,11 +1,10 @@
-import { DataWidget, Widget } from "./__init__";
+import { BuildContext, ImmutableWidget, Widget } from "./framework";
 
 interface RowParams {
     key?: string;
 }
 
-export class Row extends DataWidget {
-
+export class Row extends ImmutableWidget {
     constructor(
         private children: Widget[],
         { key }: RowParams = {}
@@ -13,19 +12,21 @@ export class Row extends DataWidget {
         super({ key });
     }
 
-    build(): Widget {
+    build(context: BuildContext): Widget {
         return this;
     }
 
-    render(): HTMLElement {
+    render(context: BuildContext): HTMLElement {
+        const widgetContext = new BuildContext(this, context);
+
         const div = document.createElement('div');
         div.style.display = 'flex';
         div.style.flexDirection = 'row';
 
         this.children.forEach(child => {
-            div.appendChild(child.render());
+            div.appendChild(child.render(widgetContext));
         });
 
-        return div;
+        return this.setElement(div);
     }
 }

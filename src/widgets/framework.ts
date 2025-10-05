@@ -20,13 +20,6 @@ function getServiceToken<T>(type: Type<T>): symbol {
     return token;
 }
 
-type Provider<T> = T | (() => T);
-
-//
-// RemovalWatcher: single global observer watching subtree removals.
-// When a watched element is part of a removed node, its callback is invoked.
-// This avoids creating a MutationObserver per widget and is easier to manage.
-//
 class RemovalWatcher {
     private static _instance: RemovalWatcher | null = null;
     static get instance(): RemovalWatcher {
@@ -34,28 +27,28 @@ class RemovalWatcher {
         return this._instance;
     }
 
-    private watchers = new Map<HTMLElement, () => void>();
+    private watchers = new Map<HTMLElement, Set<() => void>>();
     private observer?: MutationObserver;
 
     private constructor() {
         if (typeof document === 'undefined') return;
 
-        // Observe the whole document for removals
         const root = document.documentElement || document.body;
         try {
             this.observer = new MutationObserver((mutations) => {
                 for (const m of mutations) {
                     for (const node of Array.from(m.removedNodes)) {
                         if (!(node instanceof HTMLElement)) continue;
-                        // Iterate snapshot of watchers
-                        for (const [el, cb] of Array.from(this.watchers.entries())) {
+
+                        for (const [el, callbacks] of Array.from(this.watchers.entries())) {
                             if (node === el || node.contains(el)) {
-                                try {
-                                    cb();
-                                } catch (err) {
-                                    console.error('RemovalWatcher callback error:', err);
-                                }
-                                // remove watcher after it's triggered
+                                callbacks.forEach(cb => {
+                                    try {
+                                        cb();
+                                    } catch (err) {
+                                        console.error('RemovalWatcher callback error:', err);
+                                    }
+                                });
                                 this.watchers.delete(el);
                             }
                         }
@@ -65,18 +58,30 @@ class RemovalWatcher {
 
             this.observer.observe(root, { childList: true, subtree: true });
         } catch (err) {
-            // In unusual environments observer may fail; degrade gracefully.
             console.warn('RemovalWatcher: unable to create MutationObserver:', err);
             this.observer = undefined;
         }
     }
 
     watch(el: HTMLElement, cb: () => void) {
-        this.watchers.set(el, cb);
+        if (!this.watchers.has(el)) {
+            this.watchers.set(el, new Set());
+        }
+        this.watchers.get(el)!.add(cb);
     }
 
-    unwatch(el: HTMLElement) {
-        this.watchers.delete(el);
+    unwatch(el: HTMLElement, cb?: () => void) {
+        if (!cb) {
+            this.watchers.delete(el);
+            return;
+        }
+        const callbacks = this.watchers.get(el);
+        if (callbacks) {
+            callbacks.delete(cb);
+            if (callbacks.size === 0) {
+                this.watchers.delete(el);
+            }
+        }
     }
 
     disconnect() {
@@ -85,33 +90,31 @@ class RemovalWatcher {
     }
 }
 
+type Provider<T> = T | (() => T);
+
 export class BuildContext {
     private _providers = new Map<symbol, Provider<any>>();
-    private _disposables = new Set<() => void>();
-    private _children = new Set<BuildContext>();
+    private _inheritedWidgets = new Map<Type, InheritedWidget>();
     private _disposed = false;
+    private _children: BuildContext[] = [];
 
     constructor(
-        private widget: Widget,
-        private parent?: BuildContext
+        public widget: Widget,
+        public parent?: BuildContext
     ) {
-        if (this.parent) {
-            // register this context with the parent so parent.dispose cascades
-            this.parent.registerChild(this);
-        }
-    }
+        parent?._children.push(this);
 
-    private registerChild(child: BuildContext) {
-        if (!this._children.has(child)) {
-            this._children.add(child);
-            this.addDisposable(() => {
-                try {
-                    child.dispose();
-                } catch (err) {
-                    console.error('Error disposing child context:', err);
-                }
-                this._children.delete(child);
-            });
+        if (parent) {
+            this._inheritedWidgets = new Map(parent._inheritedWidgets);
+        }
+
+        if (widget instanceof InheritedWidget) {
+            const widgetType = widget.constructor as Type<InheritedWidget>;
+
+            const existingWidget = this._inheritedWidgets.get(widgetType);
+            if (!existingWidget || widget.updateShouldNotify(existingWidget)) {
+                this._inheritedWidgets.set(widgetType, widget);
+            }
         }
     }
 
@@ -142,39 +145,46 @@ export class BuildContext {
         throw new Error(`${type.name} is not provided in this context or any parent context`);
     }
 
-    addDisposable(dispose: () => void): void {
-        if (this._disposed) {
-            try { dispose(); } catch (err) { console.error('Error running immediate disposable:', err); }
-            return;
+    dependOnInheritedWidgetOfExactType<T extends InheritedWidget>(type: Type<T>): T | null {
+        const inheritedWidget = this._inheritedWidgets.get(type);
+
+        if (inheritedWidget) {
+            return inheritedWidget as T;
         }
-        this._disposables.add(dispose);
+
+        if (this.parent) {
+            return this.parent.dependOnInheritedWidgetOfExactType(type);
+        }
+
+        return null;
+    }
+
+    dependOnInheritedWidgetOfExactTypeRequired<T extends InheritedWidget>(type: Type<T>): T {
+        const widget = this.dependOnInheritedWidgetOfExactType(type);
+        if (!widget) {
+            throw new Error(`No ${type.name} found in widget tree. Make sure to wrap your widget with ${type.name}.`);
+        }
+        return widget;
     }
 
     dispose(): void {
         if (this._disposed) return;
         this._disposed = true;
 
-        for (const dispose of Array.from(this._disposables)) {
-            try {
-                dispose();
-            } catch (error) {
-                console.error('Error during context disposal:', error);
-            }
-        }
+        // Dispose all children first
+        this._children.forEach(child => child.dispose());
+        this._children = [];
 
-        this._disposables.clear();
-
-        for (const child of Array.from(this._children)) {
-            try {
-                child.dispose();
-            } catch (err) {
-                console.error('Error disposing child context in dispose():', err);
-            }
-        }
-        this._children.clear();
-
+        // Clear providers
         this._providers.clear();
-        this.parent = undefined;
+
+        // Remove from parent
+        if (this.parent) {
+            const idx = this.parent._children.indexOf(this);
+            if (idx !== -1) {
+                this.parent._children.splice(idx, 1);
+            }
+        }
     }
 }
 
@@ -184,9 +194,11 @@ export interface WidgetParams {
 
 export abstract class Widget {
     key: string;
-    protected _element?: HTMLElement;
+    public elements: Array<HTMLElement> = [];
     protected _context?: BuildContext;
     protected _disposed = false;
+    protected _onRemoveCallback?: () => void;
+    abstract name: string;
 
     constructor({ key }: WidgetParams = {}) {
         this.key =
@@ -198,60 +210,14 @@ export abstract class Widget {
 
     abstract render(context?: BuildContext): HTMLElement;
 
-    dispose(): void {
-        if (this._disposed) return;
-        this._disposed = true;
-
-        console.log(this._element);
-
-        // Remove DOM element if present
-        try {
-            if (this._element && this._element.parentNode) {
-                // detach element from DOM
-                //  this._element.remove();
-            }
-        } catch (err) {
-            console.error('Error removing widget element during dispose:', err);
-        }
-
-        // Unregister element from removal watcher to avoid callbacks after dispose
-        // try {
-        //     if (this._element) {
-        //         RemovalWatcher.instance.unwatch(this._element);
-        //     }
-        // } catch (err) {
-        //     // ignore
-        // }
-
-        // Dispose context (which will run all context disposables)
-        // try {
-        //     if (this._context) {
-        //         this._context.dispose();
-        //         this._context = undefined;
-        //     }
-        // } catch (err) {
-        //     console.error('Error disposing widget context:', err);
-        // }
-
-        // this._element = undefined;
-    }
-
-    /**
-     * Centralized element setter — sets data-key and registers the element
-     * with the global removal watcher so the framework can auto-dispose
-     * widgets removed from the DOM.
-     */
     protected setElement(element: HTMLElement): HTMLElement {
-        this._element = element;
+        this.elements.push(element);
         try {
             element.setAttribute('data-key', this.key);
-        } catch (err) {
-            // in some test environments setAttribute may fail; ignore
-        }
+        } catch (err) { }
 
-        // register removal callback
         if (typeof document !== 'undefined') {
-            const onRemoved = () => {
+            this._onRemoveCallback = () => {
                 if (!this._disposed) {
                     try {
                         this.dispose();
@@ -262,7 +228,7 @@ export abstract class Widget {
             };
 
             try {
-                RemovalWatcher.instance.watch(element, onRemoved);
+                RemovalWatcher.instance.watch(element, this._onRemoveCallback);
             } catch (err) {
                 console.warn('Failed to register element with RemovalWatcher:', err);
             }
@@ -270,10 +236,30 @@ export abstract class Widget {
 
         return element;
     }
+
+    dispose(): void {
+        if (this._disposed) return;
+        this._disposed = true;
+
+        // Clean up RemovalWatcher
+        if (this._onRemoveCallback) {
+            this.elements.forEach(el => {
+                RemovalWatcher.instance.unwatch(el, this._onRemoveCallback);
+            });
+        }
+
+        // Dispose context
+        if (this._context) {
+            this._context.dispose();
+            this._context = undefined;
+        }
+
+        this.elements = [];
+    }
 }
 
 export abstract class ImmutableWidget extends Widget {
-    private _childWidget?: Widget;
+    name: string = "ImmutableWidget";
 
     constructor(params: WidgetParams = {}) {
         super(params);
@@ -286,12 +272,7 @@ export abstract class ImmutableWidget extends Widget {
         this._context = widgetContext;
 
         try {
-            if (this._childWidget) {
-                this._childWidget.dispose();
-            }
-
-            this._childWidget = this.build(widgetContext);
-            const element = this._childWidget.render(widgetContext);
+            const element = this.build(widgetContext).render(widgetContext);
             return this.setElement(element);
         } catch (e) {
             console.error('Error rendering ImmutableWidget:', e);
@@ -300,23 +281,14 @@ export abstract class ImmutableWidget extends Widget {
     }
 
     dispose(): void {
-        console.log("disposing");
-
-        if (this._childWidget) {
-            try {
-                this._childWidget.dispose();
-            } catch (err) {
-                console.error('Error disposing child widget in ImmutableWidget.dispose():', err);
-            }
-            this._childWidget = undefined;
-        }
-
         super.dispose();
     }
 }
 
 export abstract class MutableWidget extends Widget {
-    private _mutable?: Mutable<this>;
+    name: string = "MutableWidget";
+
+    public mutable?: Mutable<this>;
 
     constructor(params: WidgetParams = {}) {
         super(params);
@@ -328,41 +300,59 @@ export abstract class MutableWidget extends Widget {
         const widgetContext = new BuildContext(this, context);
         this._context = widgetContext;
 
-        if (this._mutable == null) {
-            this._mutable = this.createMutable();
-            this._mutable.context = widgetContext;
-            this._mutable.init();
+        if (this.mutable == null) {
+            this.mutable = this.createMutable();
+            this.mutable.context = widgetContext;
+            this.mutable.init();
         } else {
-            this._mutable.context = widgetContext;
+            this.mutable.context = widgetContext;
         }
 
         try {
-            const widget = this._mutable.build(widgetContext);
+            const widget = this.mutable.build(widgetContext);
 
             if (widget instanceof Widget) {
                 const element = widget.render(widgetContext);
 
-                if (changed && this._element?.parentNode) {
-                    this._element.parentNode.replaceChild(element, this._element);
+                // If changed, replace the old element
+                if (changed && this.elements.length > 0) {
+                    const oldElement = this.elements[this.elements.length - 1];
+                    oldElement.replaceWith(element);
+                    this.elements[this.elements.length - 1] = element;
+                    return element;
                 }
 
                 return this.setElement(element);
             } else {
-                const element = (this._mutable as StateMutable<any, any, any>).render(widgetContext, widget);
+                const element = (this.mutable as StateMutable<any, any, any, any>).render(widgetContext, widget);
 
                 if (element instanceof HTMLElement) {
                     element.setAttribute('data-key', this.key);
 
-                    if (changed && this._element?.parentNode) {
-                        this._element.parentNode.replaceChild(element, this._element);
+                    // If changed, replace the old element in the DOM
+                    if (changed && this.elements.length > 0) {
+                        const oldElement = this.elements[this.elements.length - 1];
+                        if (oldElement.parentNode) {
+                            oldElement.parentNode.replaceChild(element, oldElement);
+                        }
+                        // Update the elements array
+                        this.elements[this.elements.length - 1] = element;
+
+                        // Re-register with RemovalWatcher
+                        if (this._onRemoveCallback) {
+                            RemovalWatcher.instance.unwatch(oldElement, this._onRemoveCallback);
+                            RemovalWatcher.instance.watch(element, this._onRemoveCallback);
+                        }
+
+                        return element;
                     }
                 }
 
                 return this.setElement(element as HTMLElement);
             }
         } catch (e) {
-            if ('renderLeaf' in this._mutable) {
-                const element = (this._mutable as any).renderLeaf(widgetContext);
+            if ('renderLeaf' in this.mutable) {
+                const element = (this.mutable as any).renderLeaf(widgetContext);
                 return this.setElement(element);
             }
             console.error('Error rendering MutableWidget:', e);
@@ -371,13 +361,9 @@ export abstract class MutableWidget extends Widget {
     }
 
     dispose(): void {
-        if (this._mutable) {
-            try {
-                this._mutable.dispose();
-            } catch (err) {
-                console.error('Error disposing Mutable._mutable:', err);
-            }
-            this._mutable = undefined;
+        if (this.mutable) {
+            this.mutable.dispose();
+            this.mutable = undefined;
         }
         super.dispose();
     }
@@ -398,12 +384,11 @@ let subscriber: (() => void) | null = null;
 export interface Signal<T> {
     get value(): T;
     set value(updated: T);
-    dispose(): void;
 }
 
 export abstract class ReactiveWidget<T extends MutableWidget> extends Mutable<T> {
     private _signals = new Set<Signal<any>>();
-    private _effects = new Set<() => void>();
+    private _cleanupFns = new Set<() => void>();
 
     signal<V>(value: V): Signal<V> {
         const subscriptions = new Set<() => void>();
@@ -424,25 +409,19 @@ export abstract class ReactiveWidget<T extends MutableWidget> extends Mutable<T>
                         console.error('Error in signal subscription:', error);
                     }
                 });
-            },
-            dispose() {
-                subscriptions.clear();
             }
         };
 
         this._signals.add(sig);
-
-        this.context?.addDisposable(() => sig.dispose());
-
         return sig;
     }
 
     effect(fn: () => void): () => void {
         const cleanup = () => {
-            this._effects.delete(fn);
+            this._cleanupFns.delete(cleanup);
         };
 
-        this._effects.add(fn);
+        this._cleanupFns.add(cleanup);
 
         subscriber = fn;
         try {
@@ -453,16 +432,20 @@ export abstract class ReactiveWidget<T extends MutableWidget> extends Mutable<T>
             subscriber = null;
         }
 
-        this.context?.addDisposable(cleanup);
-
         return cleanup;
     }
 
     dispose(): void {
-        this._signals.forEach(signal => signal.dispose());
+        // Clean up all effects
+        this._cleanupFns.forEach(cleanup => {
+            try {
+                cleanup();
+            } catch (err) {
+                console.error('Error during effect cleanup:', err);
+            }
+        });
+        this._cleanupFns.clear();
         this._signals.clear();
-
-        this._effects.clear();
 
         super.dispose();
     }
@@ -476,25 +459,73 @@ export interface StateMutableParams<S extends string> {
     init?: S;
 }
 
+// Type-safe state machine types
+export type FunctionArgs<P> = {
+    payload: P
+}
+
 export type TransitionFunction<S extends string> = () => S | Promise<S>;
 
-export type TransitionStates<S extends string, E extends string> =
-    | Partial<Record<E, S | ((args: { payload: any }) => S)>>
-    | TransitionFunction<S>;
+export type TransitionFunction2<S extends string> = (
+    next: (args?: any) => S | Promise<S>,
+    args?: any
+) => S | Promise<S>;
 
-export type States<S extends string, E extends string> = { [K in S]: TransitionStates<S, E> };
+export type PayloadTransitionFn<S extends string, P> = (args: FunctionArgs<P>) => S | Promise<S>;
+
+export type MiddlewareTransitionFn<S extends string, P> = (
+    args: FunctionArgs<P>,
+    next: (args: FunctionArgs<P>) => S | Promise<S>
+) => S | Promise<S>;
+
+export type EventBasedTransitions<
+    S extends string,
+    E extends string,
+    Payloads extends Partial<Record<E, unknown>>
+> = {
+        [K in E]?:
+        | S
+        | (K extends keyof Payloads
+            ? PayloadTransitionFn<S, Payloads[K]>
+            : PayloadTransitionFn<S, undefined>)
+        | ReadonlyArray<
+            K extends keyof Payloads
+            ? MiddlewareTransitionFn<S, Payloads[K]>
+            : MiddlewareTransitionFn<S, undefined>
+        >;
+    };
+
+export type TransitionStates<
+    S extends string,
+    E extends string = string,
+    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
+> =
+    | EventBasedTransitions<S, E, Payloads>
+    | TransitionFunction<S>
+    | ReadonlyArray<TransitionFunction2<S>>;
+
+export type States<
+    S extends string,
+    E extends string,
+    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
+> = {
+        [K in S]: TransitionStates<S, E, Payloads>;
+    };
 
 export type Widgets<S extends string> = Partial<
-    Record<string, (args: { state: S }) => Widget | null>
+    Record<string, (args: { state: S }) => Widget>
 >;
 
 export abstract class StateMutable<
     T extends MutableWidget,
     S extends string,
-    E extends string
+    E extends string,
+    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
 > extends ReactiveWidget<T> {
     state: S;
-    listeners: Record<E, Array<any>> = {} as Record<E, Array<any>>;
+    listeners: Partial<Record<E, Array<() => void>>> = {};
+    private _rendering = false;
+    private _pendingState?: S;
 
     constructor(public widget: T, { init }: StateMutableParams<S> = {}) {
         super(widget);
@@ -512,22 +543,32 @@ export abstract class StateMutable<
         this.state = init ?? (stateKeys[0] as S);
     }
 
-    abstract states(): States<S, E>;
+    abstract states(): States<S, E, Payloads>;
     abstract build(context: BuildContext): Widgets<S>;
 
-    public subscribe(states: Partial<Record<E, any>>): this {
-        for (let key in states) {
-            if (this.listeners[key as E]) {
-                this.listeners[key as E].push(states[key as E]);
-            } else {
-                this.listeners[key as E] = [states[key as E]];
+    public subscribe(callbacks: Partial<Record<E, () => void>>): this {
+        for (const key in callbacks) {
+            const event = key as E;
+            const callback = callbacks[event];
+            if (callback) {
+                if (!this.listeners[event]) {
+                    this.listeners[event] = [];
+                }
+                this.listeners[event]!.push(callback);
             }
         }
-
         return this;
     }
 
-    public send(event: E, payload?: any): void {
+    public send<K extends E>(
+        event: K,
+        ...args: K extends keyof Payloads
+            ? Payloads[K] extends never
+            ? []
+            : [payload: Payloads[K]]
+            : []
+    ): void {
+        const payload = args[0];
         const states = this.states();
         const handler = states[this.state];
 
@@ -537,17 +578,19 @@ export abstract class StateMutable<
             if (typeof handler === 'function') {
                 const result = (handler as TransitionFunction<S>)();
                 this.resolveTransition(result, payload);
+            } else if (Array.isArray(handler)) {
+                this.resolveMiddlewareChain(handler as ReadonlyArray<TransitionFunction2<S>>);
             } else if (typeof handler === 'object') {
-                const stateMap = handler as Partial<
-                    Record<E, S | ((args: { payload: string }) => S)>
-                >;
-                if (stateMap[event] !== undefined) {
-                    this.resolveTransition(stateMap[event]!, payload);
+                const eventHandler = (handler as EventBasedTransitions<S, E, Payloads>)[event];
+                if (eventHandler !== undefined) {
+                    this.resolveTransition(eventHandler, payload);
                 }
             }
 
-            if (this.listeners[event]) {
-                this.listeners[event].forEach(cb => {
+            // Trigger listeners
+            const eventListeners = this.listeners[event];
+            if (eventListeners) {
+                eventListeners.forEach(cb => {
                     try {
                         cb();
                     } catch (error) {
@@ -563,8 +606,25 @@ export abstract class StateMutable<
         }
     }
 
+    private resolveMiddlewareChain(
+        middleware: ReadonlyArray<TransitionFunction2<S>>,
+    ): void {
+        let index = 0;
+        const next = (args?: any) => {
+            if (index >= middleware.length) {
+                return this.state;
+            }
+            const fn = middleware[index++];
+            const result = fn(next, args);
+            return result;
+        };
+
+        const result = next(undefined);
+        this.resolveTransition(result, undefined);
+    }
+
     private resolveTransition(
-        result: S | Promise<S> | ((args: { payload: string }) => S),
+        result: S | Promise<S> | PayloadTransitionFn<S, any> | ReadonlyArray<MiddlewareTransitionFn<S, any>>,
         payload: any
     ): void {
         if (result instanceof Promise) {
@@ -574,10 +634,22 @@ export abstract class StateMutable<
             return;
         }
 
+        if (Array.isArray(result)) {
+            // Middleware array for specific event
+            this.resolveEventMiddlewareChain(result, payload);
+            return;
+        }
+
         if (typeof result === 'function') {
             try {
-                const fnResult = (result as (args: { payload: string }) => S)({ payload });
-                this.applyTransition(fnResult);
+                const fnResult = (result as PayloadTransitionFn<S, any>)({ payload });
+                if (fnResult instanceof Promise) {
+                    fnResult
+                        .then(next => this.applyTransition(next))
+                        .catch(error => console.error(`Async transition function failed:`, error));
+                } else {
+                    this.applyTransition(fnResult);
+                }
             } catch (error) {
                 console.error('Transition function threw an error:', error);
             }
@@ -587,13 +659,56 @@ export abstract class StateMutable<
         this.applyTransition(result as S);
     }
 
+    private resolveEventMiddlewareChain(
+        middleware: ReadonlyArray<MiddlewareTransitionFn<S, any>>,
+        payload: any
+    ): void {
+        let index = 0;
+        const next = (p: any): S | Promise<S> => {
+            if (index >= middleware.length) {
+                return this.state; // No more middleware
+            }
+            const fn = middleware[index++];
+            const result = fn({ payload: p }, next);
+            return result;
+        };
+
+        const result = next(payload);
+        if (result instanceof Promise) {
+            result
+                .then(nextState => this.applyTransition(nextState))
+                .catch(error => console.error(`Middleware chain failed:`, error));
+        } else {
+            this.applyTransition(result);
+        }
+    }
+
     private applyTransition(next: S): void {
         if (!next || this.state === next) {
             return;
         }
 
+        // Prevent re-render during render cycle
+        if (this._rendering) {
+            this._pendingState = next;
+            return;
+        }
+
         this.state = next;
-        this.widget.render(this.context, true);
+        this._rendering = true;
+
+        try {
+            this.widget.render(this.context, true);
+        } finally {
+            this._rendering = false;
+
+            // Apply any pending state change
+            if (this._pendingState && this._pendingState !== this.state) {
+                const pending = this._pendingState;
+                this._pendingState = undefined;
+                this.applyTransition(pending);
+            }
+        }
     }
 
     private async autoStep(maxSteps = 10): Promise<void> {
@@ -725,10 +840,28 @@ export abstract class StateMutable<
     }
 
     dispose(): void {
-        for (const key in this.listeners) {
-            this.listeners[key] = [];
-        }
+        // Clear listeners
+        this.listeners = {};
 
         super.dispose();
+    }
+}
+
+export abstract class InheritedWidget extends Widget {
+    name: string = "InheritedWidget";
+
+    constructor(public child: Widget, params: WidgetParams = {}) {
+        super(params);
+    }
+
+    abstract updateShouldNotify(old_widget: InheritedWidget): boolean;
+
+    render(context?: BuildContext): HTMLElement {
+        const widgetContext = new BuildContext(this, context);
+        return this.child.render(widgetContext);
+    }
+
+    dispose(): void {
+
     }
 }

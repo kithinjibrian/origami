@@ -1,14 +1,29 @@
+import { TextStyle } from "../painting/text_style";
+import { Reactive } from "../types/__init__";
+import { resolveReactive } from "../utils/__init__";
 import {
     BuildContext,
     DataMutable,
-    Mutable,
     MutableWidget,
     Widget
 } from "./framework";
 
+interface TextParams {
+    style?: TextStyle
+}
+
 export class Text extends MutableWidget {
-    constructor(public value: string | (() => string)) {
+    style?: TextStyle;
+
+    constructor(
+        public value: Reactive<string>,
+        {
+            style
+        }: TextParams = {}
+    ) {
         super();
+
+        this.style = style;
     }
 
     createMutable(): DataMutable<this> {
@@ -28,14 +43,14 @@ class TextMutable<T extends Text> extends DataMutable<T> {
     renderLeaf(context: BuildContext): HTMLElement {
         const span = document.createElement('span');
 
-        if (typeof this.widget.value === "string") {
-            span.textContent = this.widget.value;
-        } else {
-            this.effect(() => {
-                span.textContent = (this.widget.value as () => string)();
-            });
-        }
+        this.effect(() => {
+            const v = resolveReactive(this.widget.value);
+            span.textContent = v!;
+        });
+
+        this.widget.style?.applyTo(span, (fn) => this.effect(fn));
 
         return span;
     }
+
 }

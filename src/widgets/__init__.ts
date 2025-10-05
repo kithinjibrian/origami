@@ -4,3 +4,7 @@ export * from "./text";
 export * from "./column";
 export * from "./button";
 export * from "./provider";
+export * from "./text_field";
+export * from "./row";
+export * from "./container";
+export * from "./multiprovider";
