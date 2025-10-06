@@ -5,30 +5,28 @@ import {
     StateMutable,
     States,
     Widget,
-    Widgets
+    Widgets,
 } from "../../../widgets/__init__";
 
 interface RouterParams<
-    P extends string,
-    E extends string,
-    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
+    S extends string,
+    E extends Record<string, any>
 > {
     key?: string;
-    initialPage: P;
-    pages: Record<P, (args: { state: P }) => Widget>
-    navigationMap: States<P, E, Payloads>
+    initialPage: S;
+    pages: Widgets<S>
+    navigationMap: States<S, E>
     init?: (context: BuildContext) => void
 }
 
 export class Router<
-    P extends string,
-    E extends string,
-    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
+    S extends string,
+    E extends Record<string, any>
 > extends MutableWidget {
-    initialPage: P;
-    pages: Record<P, (args: { state: P }) => Widget>;
-    navigationMap: States<P, E, Payloads>;
-    init?: (context: BuildContext) => void;
+    initialPage: S;
+    pages: Widgets<S>
+    navigationMap: States<S, E>
+    init?: (context: BuildContext) => void
 
     constructor({
         key,
@@ -36,7 +34,7 @@ export class Router<
         pages,
         navigationMap,
         init,
-    }: RouterParams<P, E, Payloads>) {
+    }: RouterParams<S, E>) {
         super({ key });
 
         this.initialPage = initialPage;
@@ -46,17 +44,17 @@ export class Router<
     }
 
     createMutable(): Mutable<this> {
-        return new RouterMutable<this, P, E>(this);
+        return new RouterMutable<this, S, E>(this, this.initialPage);
     }
 }
 
 class RouterMutable<
     T extends Router<any, any>,
-    P extends string,
-    E extends string,
-> extends StateMutable<T, P, E> {
-    constructor(widget: T) {
-        super(widget);
+    S extends string,
+    E extends Record<string, any>
+> extends StateMutable<T, S, E> {
+    constructor(widget: T, init: S) {
+        super(widget, { init: init });
     }
 
     init(): void {
@@ -67,7 +65,7 @@ class RouterMutable<
         return this.widget.navigationMap;
     }
 
-    build(context: BuildContext): Widgets<P> {
+    build(context: BuildContext) {
         return this.widget.pages;
     }
 }

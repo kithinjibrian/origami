@@ -1,6 +1,9 @@
-import { Widget } from "./framework";
+import { BuildContext, Widget } from "./framework";
 
 export function run_app(widget: Widget, container: HTMLElement) {
-    const rootElement = widget.render();
+    const rootContext = new BuildContext(widget);
+
+    const rootElement = widget.render(rootContext);
+
     container.appendChild(rootElement);
 }

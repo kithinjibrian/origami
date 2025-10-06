@@ -44,36 +44,6 @@ type TransitionStates<
     ? EventBasedTransitions<S, E, D, P, K>
     : TransitionFunction<S, D, K>;
 
-type HasAllEvents<E extends string, Entry> = [E] extends [keyof Entry]
-    ? [keyof Entry] extends [E]
-    ? true
-    : false
-    : false;
-
-type ValuesAreUnique<T extends Record<string, any>> = {
-    [K in keyof T]: Exclude<
-        { [P in keyof T]: P extends K ? never : T[P] }[keyof T],
-        T[K]
-    > extends never
-    ? true
-    : false;
-}[keyof T] extends false
-    ? false
-    : true;
-
-type ValidEntryState<
-    E extends string,
-    S extends string
-> = {
-    [K in E]: S;
-} & {
-    __check__?: HasAllEvents<E, { [K in E]: S }> extends true
-    ? ValuesAreUnique<{ [K in E]: S }> extends true
-    ? true
-    : never
-    : never;
-};
-
 export type BlocStates<
     StateConfig extends Record<string, any>,
     EventConfig extends Record<string, any>

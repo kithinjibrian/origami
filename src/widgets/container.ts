@@ -9,55 +9,42 @@ interface ContainerParams {
 }
 
 export class Container extends ImmutableWidget {
-    margin?: EdgeInsets;
-    padding?: EdgeInsets;
-    color?: Color;
+    name = "Container";
 
     constructor(
         private child: Widget,
-        {
-            key,
-            margin,
-            padding,
-            color,
-        }: ContainerParams = {}
+        private params: ContainerParams = {}
     ) {
-        super({ key });
-        this.margin = margin;
-        this.padding = padding;
-        this.color = color;
+        super({ key: params.key });
     }
 
-    build(): Widget {
-        return this;
-    }
+    build(context: BuildContext): Widget {
+        const { margin, padding, color } = this.params;
+        const child = this.child;
 
-    render(context: BuildContext): HTMLElement {
-        const widgetContext = new BuildContext(this, context);
+        return new class extends Widget {
+            name = "ContainerBody";
 
+            render(ctx: BuildContext): Node {
+                const el = document.createElement("div");
 
-        const div = document.createElement('div');
+                if (margin) {
+                    el.style.margin = margin.toString();
+                }
 
-        if (this.margin) {
-            div.style.marginTop = `${this.margin.top || 0}px`;
-            div.style.marginRight = `${this.margin.right || 0}px`;
-            div.style.marginBottom = `${this.margin.bottom || 0}px`;
-            div.style.marginLeft = `${this.margin.left || 0}px`;
-        }
+                if (padding) {
+                    el.style.padding = padding.toString();
+                }
 
-        if (this.padding) {
-            div.style.paddingTop = `${this.padding.top || 0}px`;
-            div.style.paddingRight = `${this.padding.right || 0}px`;
-            div.style.paddingBottom = `${this.padding.bottom || 0}px`;
-            div.style.paddingLeft = `${this.padding.left || 0}px`;
-        }
+                if (color) {
+                    el.style.backgroundColor = color.toString();
+                }
 
-        if (this.color) {
-            div.style.backgroundColor = this.color.toString();
-        }
+                const childEl = child.render(ctx);
+                el.appendChild(childEl);
 
-        div.appendChild(this.child.render(widgetContext));
-
-        return div;
+                return this.setElement(el) as Node;
+            }
+        }({ key: `${this.key}_body` });
     }
 }

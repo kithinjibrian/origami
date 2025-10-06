@@ -6,10 +6,10 @@ export interface EdgeInsetsParams {
 }
 
 export class EdgeInsets {
-    left: number;
-    top: number;
-    right: number;
-    bottom: number;
+    left: number = 0;
+    top: number = 0;
+    right: number = 0;
+    bottom: number = 0;
 
     constructor({
         left,
@@ -73,5 +73,9 @@ export class EdgeInsets {
             right: horizontal ?? 0,
             bottom: vertical ?? 0,
         });
+    }
+
+    toString() {
+        return `${this.top}px ${this.right}px ${this.bottom}px ${this.left}px`
     }
 }

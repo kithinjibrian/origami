@@ -5,6 +5,8 @@ interface ColumnParams {
 }
 
 export class Column extends ImmutableWidget {
+    name = "Column";
+
     constructor(
         private children: Widget[],
         { key }: ColumnParams = {}
@@ -13,20 +15,23 @@ export class Column extends ImmutableWidget {
     }
 
     build(context: BuildContext): Widget {
-        return this;
-    }
+        const children = this.children;
 
-    render(context: BuildContext): HTMLElement {
-        const widgetContext = new BuildContext(this, context);
+        return new class extends Widget {
+            name = "ColumnBody";
 
-        const div = document.createElement('div');
-        div.style.display = 'flex';
-        div.style.flexDirection = 'column';
+            render(ctx: BuildContext): Node {
+                const el = document.createElement("div");
+                el.style.display = "flex";
+                el.style.flexDirection = "column";
 
-        this.children.forEach(child => {
-            div.appendChild(child.render(widgetContext));
-        });
+                for (const child of children) {
+                    const childEl = child.render(ctx);
+                    el.appendChild(childEl);
+                }
 
-        return this.setElement(div);
+                return this.setElement(el);
+            }
+        }({ key: `${this.key}_body` });
     }
 }

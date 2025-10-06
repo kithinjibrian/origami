@@ -27,7 +27,7 @@ class RemovalWatcher {
         return this._instance;
     }
 
-    private watchers = new Map<HTMLElement, Set<() => void>>();
+    private watchers: WeakMap<Node, Set<() => void>> = new WeakMap();
     private observer?: MutationObserver;
 
     private constructor() {
@@ -35,27 +35,7 @@ class RemovalWatcher {
 
         const root = document.documentElement || document.body;
         try {
-            this.observer = new MutationObserver((mutations) => {
-                for (const m of mutations) {
-                    for (const node of Array.from(m.removedNodes)) {
-                        if (!(node instanceof HTMLElement)) continue;
-
-                        for (const [el, callbacks] of Array.from(this.watchers.entries())) {
-                            if (node === el || node.contains(el)) {
-                                callbacks.forEach(cb => {
-                                    try {
-                                        cb();
-                                    } catch (err) {
-                                        console.error('RemovalWatcher callback error:', err);
-                                    }
-                                });
-                                this.watchers.delete(el);
-                            }
-                        }
-                    }
-                }
-            });
-
+            this.observer = new MutationObserver((mutations) => this.processMutations(mutations));
             this.observer.observe(root, { childList: true, subtree: true });
         } catch (err) {
             console.warn('RemovalWatcher: unable to create MutationObserver:', err);
@@ -63,30 +43,74 @@ class RemovalWatcher {
         }
     }
 
-    watch(el: HTMLElement, cb: () => void) {
-        if (!this.watchers.has(el)) {
-            this.watchers.set(el, new Set());
+    private processMutations(mutations: MutationRecord[]) {
+        for (const m of mutations) {
+            for (const node of Array.from(m.removedNodes)) {
+                this.triggerForRemoved(node);
+            }
         }
-        this.watchers.get(el)!.add(cb);
+
+        Promise.resolve().then(() => this.checkDisconnected());
     }
 
-    unwatch(el: HTMLElement, cb?: () => void) {
+    private strongRefs: Map<Node, Set<() => void>> = new Map();
+
+    private triggerForRemoved_iterable(node: Node) {
+        for (const [watchedNode, callbacks] of Array.from(this.strongRefs.entries())) {
+            if (node === watchedNode || node.contains(watchedNode)) {
+                callbacks.forEach(cb => {
+                    try { cb(); } catch (err) { console.error('RemovalWatcher callback error:', err); }
+                });
+                this.unwatch(watchedNode);
+            }
+        }
+    }
+
+    private triggerForRemoved(node: Node) {
+        this.triggerForRemoved_iterable(node);
+    }
+
+    private checkDisconnected() {
+        for (const [node, callbacks] of Array.from(this.strongRefs.entries())) {
+            if (!(node as any).isConnected) {
+                callbacks.forEach(cb => {
+                    try { cb(); } catch (err) { console.error('RemovalWatcher callback error (disconnected):', err); }
+                });
+                this.unwatch(node);
+            }
+        }
+    }
+
+    watch(node: Node, cb: () => void) {
+        if (!node) return;
+        this.strongRefs.set(node, this.strongRefs.get(node) ?? new Set());
+        this.strongRefs.get(node)!.add(cb);
+
+        const existing = this.watchers.get(node) ?? new Set();
+        existing.add(cb);
+        this.watchers.set(node, existing);
+    }
+
+    unwatch(node: Node, cb?: () => void) {
+        if (!node) return;
+        const set = this.strongRefs.get(node);
+        if (!set) return;
         if (!cb) {
-            this.watchers.delete(el);
+            this.strongRefs.delete(node);
+            this.watchers.delete(node);
             return;
         }
-        const callbacks = this.watchers.get(el);
-        if (callbacks) {
-            callbacks.delete(cb);
-            if (callbacks.size === 0) {
-                this.watchers.delete(el);
-            }
+        set.delete(cb);
+        if (set.size === 0) {
+            this.strongRefs.delete(node);
+            this.watchers.delete(node);
         }
     }
 
     disconnect() {
         this.observer?.disconnect();
-        this.watchers.clear();
+        this.strongRefs.clear();
+        this.watchers = new WeakMap();
     }
 }
 
@@ -98,10 +122,7 @@ export class BuildContext {
     private _disposed = false;
     private _children: BuildContext[] = [];
 
-    constructor(
-        public widget: Widget,
-        public parent?: BuildContext
-    ) {
+    constructor(public widget: Widget, public parent?: BuildContext) {
         parent?._children.push(this);
 
         if (parent) {
@@ -110,7 +131,6 @@ export class BuildContext {
 
         if (widget instanceof InheritedWidget) {
             const widgetType = widget.constructor as Type<InheritedWidget>;
-
             const existingWidget = this._inheritedWidgets.get(widgetType);
             if (!existingWidget || widget.updateShouldNotify(existingWidget)) {
                 this._inheritedWidgets.set(widgetType, widget);
@@ -147,15 +167,8 @@ export class BuildContext {
 
     dependOnInheritedWidgetOfExactType<T extends InheritedWidget>(type: Type<T>): T | null {
         const inheritedWidget = this._inheritedWidgets.get(type);
-
-        if (inheritedWidget) {
-            return inheritedWidget as T;
-        }
-
-        if (this.parent) {
-            return this.parent.dependOnInheritedWidgetOfExactType(type);
-        }
-
+        if (inheritedWidget) return inheritedWidget as T;
+        if (this.parent) return this.parent.dependOnInheritedWidgetOfExactType(type);
         return null;
     }
 
@@ -171,209 +184,301 @@ export class BuildContext {
         if (this._disposed) return;
         this._disposed = true;
 
-        // Dispose all children first
         this._children.forEach(child => child.dispose());
         this._children = [];
-
-        // Clear providers
         this._providers.clear();
+        this._inheritedWidgets.clear();
 
-        // Remove from parent
         if (this.parent) {
             const idx = this.parent._children.indexOf(this);
-            if (idx !== -1) {
-                this.parent._children.splice(idx, 1);
-            }
+            if (idx !== -1) this.parent._children.splice(idx, 1);
         }
     }
 }
 
-export interface WidgetParams {
-    key?: string;
-}
+
+export interface WidgetParams { key?: string }
+
+const MAX_RENDER_DEPTH = 100;
 
 export abstract class Widget {
     key: string;
-    public elements: Array<HTMLElement> = [];
+    public elements: Node[] = [];
+    public _renderDepth = 0;
     protected _context?: BuildContext;
     protected _disposed = false;
     protected _onRemoveCallback?: () => void;
     abstract name: string;
 
+    protected _anchorStart?: Comment;
+    protected _anchorEnd?: Comment;
+
     constructor({ key }: WidgetParams = {}) {
-        this.key =
-            key ??
-            `${this.constructor.name}_${Date.now()}_${Math.random()
-                .toString(36)
-                .substring(2, 5)}`;
+        this.key = key ?? `${this.constructor.name}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
     }
 
-    abstract render(context?: BuildContext): HTMLElement;
+    abstract render(context: BuildContext): Node;
 
-    protected setElement(element: HTMLElement): HTMLElement {
-        this.elements.push(element);
+    protected setElement(node: Node): Node {
+        this.elements.push(node);
         try {
-            element.setAttribute('data-key', this.key);
+            if (node instanceof HTMLElement) node.setAttribute('data-key', this.key);
         } catch (err) { }
 
         if (typeof document !== 'undefined') {
-            this._onRemoveCallback = () => {
-                if (!this._disposed) {
-                    try {
-                        this.dispose();
-                    } catch (e) {
-                        console.error('Error disposing widget on DOM removal:', e);
+            if (!this._onRemoveCallback) {
+                this._onRemoveCallback = () => {
+                    if (!this._disposed) {
+                        try { this.dispose(); } catch (e) { console.error('Error disposing widget on DOM removal:', e); }
                     }
-                }
-            };
-
-            try {
-                RemovalWatcher.instance.watch(element, this._onRemoveCallback);
-            } catch (err) {
-                console.warn('Failed to register element with RemovalWatcher:', err);
+                };
             }
+
+            try { RemovalWatcher.instance.watch(node, this._onRemoveCallback); } catch (err) { console.warn('Failed to register element with RemovalWatcher:', err); }
         }
 
-        return element;
+        return node;
+    }
+
+    protected createAnchors(): [Comment, Comment] {
+        if (this._anchorStart && this._anchorEnd) return [this._anchorStart, this._anchorEnd];
+        const start = document.createComment(`widget:start:${this.key}`);
+        const end = document.createComment(`widget:end:${this.key}`);
+        this._anchorStart = start;
+        this._anchorEnd = end;
+
+        if (!this._onRemoveCallback) {
+            this._onRemoveCallback = () => {
+                if (!this._disposed) {
+                    try { this.dispose(); } catch (e) { console.error('Error disposing widget from anchor removal:', e); }
+                }
+            };
+        }
+
+        try { RemovalWatcher.instance.watch(start, this._onRemoveCallback); } catch (err) { /* ignore */ }
+
+        return [start, end];
+    }
+
+    protected mountAnchors(parent: Node, before?: Node | null) {
+        const [start, end] = this.createAnchors();
+        parent.insertBefore(start, before ?? null);
+        parent.insertBefore(end, before ?? null);
+    }
+
+    protected removeAnchors() {
+        if (this._anchorStart && this._anchorStart.parentNode) this._anchorStart.parentNode.removeChild(this._anchorStart);
+        if (this._anchorEnd && this._anchorEnd.parentNode) this._anchorEnd.parentNode.removeChild(this._anchorEnd);
+        if (this._anchorStart) RemovalWatcher.instance.unwatch(this._anchorStart, this._onRemoveCallback);
+        this._anchorStart = undefined;
+        this._anchorEnd = undefined;
     }
 
     dispose(): void {
         if (this._disposed) return;
         this._disposed = true;
 
-        // Clean up RemovalWatcher
         if (this._onRemoveCallback) {
-            this.elements.forEach(el => {
-                RemovalWatcher.instance.unwatch(el, this._onRemoveCallback);
-            });
+            this.elements.forEach(el => RemovalWatcher.instance.unwatch(el));
         }
 
-        // Dispose context
         if (this._context) {
             this._context.dispose();
             this._context = undefined;
         }
 
         this.elements = [];
+        this.removeAnchors();
     }
 }
 
 export abstract class ImmutableWidget extends Widget {
-    name: string = "ImmutableWidget";
-
-    constructor(params: WidgetParams = {}) {
-        super(params);
-    }
-
+    name: string = 'ImmutableWidget';
     abstract build(context: BuildContext): Widget;
 
-    render(context?: BuildContext): HTMLElement {
+    render(context: BuildContext): Node {
+        if (this._renderDepth++ > MAX_RENDER_DEPTH) throw new Error(`Maximum render depth exceeded (${MAX_RENDER_DEPTH}). Possible circular reference in widget tree.`);
+
         const widgetContext = new BuildContext(this, context);
         this._context = widgetContext;
 
         try {
-            const element = this.build(widgetContext).render(widgetContext);
-            return this.setElement(element);
+            const childWidget = this.build(widgetContext);
+            childWidget._renderDepth = this._renderDepth;
+            const node = childWidget.render(widgetContext);
+
+            this.elements = childWidget.elements.slice();
+            return node;
         } catch (e) {
             console.error('Error rendering ImmutableWidget:', e);
-            throw new Error("Error rendering widgets");
+            throw e;
+        } finally {
+            this._renderDepth--;
         }
-    }
-
-    dispose(): void {
-        super.dispose();
     }
 }
 
 export abstract class MutableWidget extends Widget {
-    name: string = "MutableWidget";
-
+    name: string = 'MutableWidget';
     public mutable?: Mutable<this>;
-
-    constructor(params: WidgetParams = {}) {
-        super(params);
-    }
 
     abstract createMutable(): Mutable<this>;
 
-    render(context?: BuildContext, changed: boolean = false): HTMLElement {
+    render(context: BuildContext, changed: boolean = false): Node {
+        if (this._renderDepth++ > MAX_RENDER_DEPTH) throw new Error(`Maximum render depth exceeded (${MAX_RENDER_DEPTH}). Possible circular reference in widget tree.`);
+
         const widgetContext = new BuildContext(this, context);
         this._context = widgetContext;
 
         if (this.mutable == null) {
             this.mutable = this.createMutable();
             this.mutable.context = widgetContext;
-            this.mutable.init();
+            try { this.mutable.init(); } catch (err) { console.error('Error in mutable.init:', err); }
         } else {
             this.mutable.context = widgetContext;
         }
 
         try {
-            const widget = this.mutable.build(widgetContext);
+            const buildResult = this.mutable.build(widgetContext);
 
-            if (widget instanceof Widget) {
-                const element = widget.render(widgetContext);
+            if (buildResult instanceof Widget) {
+                const childWidget = buildResult as Widget;
+                childWidget._renderDepth = this._renderDepth;
+                const node = childWidget.render(widgetContext);
 
-                // If changed, replace the old element
-                if (changed && this.elements.length > 0) {
-                    const oldElement = this.elements[this.elements.length - 1];
-                    oldElement.replaceWith(element);
-                    this.elements[this.elements.length - 1] = element;
+                if (changed && this._anchorStart && this._anchorEnd) {
+                    this.atomicReplaceBetweenAnchors(node);
+                    this.elements = childWidget.elements.slice();
+                    return node;
+                }
+
+                if (!this._anchorStart || !this._anchorEnd) {
+                    const fragment = document.createDocumentFragment();
+                    const [s, e] = this.createAnchors();
+                    fragment.appendChild(s);
+                    fragment.appendChild(node);
+                    fragment.appendChild(e);
+                    this.elements = childWidget.elements.slice();
+                    return fragment as unknown as Node;
+                }
+
+                this.elements = childWidget.elements.slice();
+                return node;
+
+            } else {
+                const element = (this.mutable as any).render(widgetContext, buildResult) as Node;
+                if (!(element instanceof Node)) throw new Error("Mutable's render method must return a DOM Node.");
+
+                if (changed && this._anchorStart && this._anchorEnd) {
+                    this.atomicReplaceBetweenAnchors(element);
+
+                    this.unregisterElements();
+                    this.elements = [element];
+                    this.registerElements();
                     return element;
                 }
 
-                return this.setElement(element);
-            } else {
-                const element = (this.mutable as StateMutable<any, any, any, any>).render(widgetContext, widget);
-
-                if (element instanceof HTMLElement) {
-                    element.setAttribute('data-key', this.key);
-
-                    // If changed, replace the old element in the DOM
-                    if (changed && this.elements.length > 0) {
-                        const oldElement = this.elements[this.elements.length - 1];
-                        if (oldElement.parentNode) {
-                            oldElement.parentNode.replaceChild(element, oldElement);
-                        }
-                        // Update the elements array
-                        this.elements[this.elements.length - 1] = element;
-
-                        // Re-register with RemovalWatcher
-                        if (this._onRemoveCallback) {
-                            RemovalWatcher.instance.unwatch(oldElement, this._onRemoveCallback);
-                            RemovalWatcher.instance.watch(element, this._onRemoveCallback);
-                        }
-
-                        return element;
-                    }
+                if (!this._anchorStart || !this._anchorEnd) {
+                    this.elements = [element];
+                    this.registerElements();
+                    return element;
                 }
 
-                return this.setElement(element as HTMLElement);
+                this.insertBetweenAnchors(element);
+                this.elements = [element];
+                this.registerElements();
+                return element;
             }
+
         } catch (e) {
-            if ('renderLeaf' in this.mutable) {
-                const element = (this.mutable as any).renderLeaf(widgetContext);
-                return this.setElement(element);
+            try {
+                if (this.mutable && (this.mutable as any).renderLeaf) {
+                    const leaf = (this.mutable as any).renderLeaf(widgetContext);
+                    this.elements = [leaf];
+                    this.registerElements();
+                    return leaf;
+                }
+            } catch (err) {
+                console.error('Error rendering MutableWidget leaf fallback:', err);
             }
+
             console.error('Error rendering MutableWidget:', e);
-            throw new Error("Error rendering widgets");
+            throw e;
+        } finally {
+            this._renderDepth--;
         }
+    }
+
+    protected unregisterElements() {
+        this.elements.forEach(n => RemovalWatcher.instance.unwatch(n));
+    }
+
+    protected registerElements() {
+        if (!this._onRemoveCallback) {
+            this._onRemoveCallback = () => {
+                if (!this._disposed) {
+                    try { this.dispose(); } catch (e) { console.error('Error disposing widget on DOM removal:', e); }
+                }
+            };
+        }
+        this.elements.forEach(n => RemovalWatcher.instance.watch(n, this._onRemoveCallback!));
+    }
+
+    protected insertBetweenAnchors(node: Node) {
+        if (!this._anchorStart || !this._anchorEnd) return;
+        const parent = this._anchorStart.parentNode;
+        if (!parent) {
+            this._anchorStart.parentNode?.insertBefore(node, this._anchorEnd ?? null);
+            return;
+        }
+
+        let cur = this._anchorStart.nextSibling;
+        const frag = document.createDocumentFragment();
+        frag.appendChild(node);
+
+        const nodesToRemove: Node[] = [];
+        while (cur && cur !== this._anchorEnd) {
+            nodesToRemove.push(cur);
+            cur = cur.nextSibling;
+        }
+        for (const n of nodesToRemove) n.parentNode?.removeChild(n);
+
+        parent.insertBefore(frag, this._anchorEnd);
+    }
+
+    protected atomicReplaceBetweenAnchors(node: Node) {
+        if (!this._anchorStart || !this._anchorEnd) return;
+        const parent = this._anchorStart.parentNode;
+        if (!parent) return;
+
+        const frag = document.createDocumentFragment();
+        frag.appendChild(node);
+
+        let cur = this._anchorStart.nextSibling;
+        const toRemove: Node[] = [];
+        while (cur && cur !== this._anchorEnd) {
+            toRemove.push(cur);
+            cur = cur.nextSibling;
+        }
+        for (const n of toRemove) parent.removeChild(n);
+
+        parent.insertBefore(frag, this._anchorEnd);
     }
 
     dispose(): void {
         if (this.mutable) {
-            this.mutable.dispose();
+            try { this.mutable.dispose(); } catch (err) { console.error('Error disposing mutable:', err); }
             this.mutable = undefined;
         }
+        this.unregisterElements();
         super.dispose();
     }
 }
 
+
 export abstract class Mutable<T extends MutableWidget> {
     context!: BuildContext;
-
     constructor(public widget: T) { }
-
     build(context: BuildContext): any { }
     init() { }
     dispose() { }
@@ -386,29 +491,28 @@ export interface Signal<T> {
     set value(updated: T);
 }
 
+interface SignalInternal<T> extends Signal<T> {
+    _subscriptions: Set<() => void>;
+    _cleanup: () => void;
+}
+
 export abstract class ReactiveWidget<T extends MutableWidget> extends Mutable<T> {
-    private _signals = new Set<Signal<any>>();
+    private _signals = new Set<SignalInternal<any>>();
     private _cleanupFns = new Set<() => void>();
 
     signal<V>(value: V): Signal<V> {
         const subscriptions = new Set<() => void>();
 
-        const sig: Signal<V> = {
+        const sig: SignalInternal<V> = {
+            _subscriptions: subscriptions,
+            _cleanup: () => { subscriptions.clear(); },
             get value() {
-                if (subscriber !== null) {
-                    subscriptions.add(subscriber);
-                }
+                if (subscriber !== null) subscriptions.add(subscriber);
                 return value;
             },
             set value(updated: V) {
                 value = updated;
-                subscriptions.forEach(fn => {
-                    try {
-                        fn();
-                    } catch (error) {
-                        console.error('Error in signal subscription:', error);
-                    }
-                });
+                subscriptions.forEach(fn => { try { fn(); } catch (err) { console.error('Error in signal subscription:', err); } });
             }
         };
 
@@ -417,34 +521,52 @@ export abstract class ReactiveWidget<T extends MutableWidget> extends Mutable<T>
     }
 
     effect(fn: () => void): () => void {
+        let isActive = true;
+        const wrapper = () => {
+            if (!isActive) return;
+            subscriber = wrapper;
+            try { fn(); } catch (err) { console.error('Error in effect:', err); } finally { subscriber = null; }
+        };
+
         const cleanup = () => {
+            isActive = false;
             this._cleanupFns.delete(cleanup);
+            this._signals.forEach(sig => sig._subscriptions.delete(wrapper));
         };
 
         this._cleanupFns.add(cleanup);
-
-        subscriber = fn;
-        try {
-            fn();
-        } catch (error) {
-            console.error('Error in effect:', error);
-        } finally {
-            subscriber = null;
-        }
-
+        wrapper();
         return cleanup;
     }
 
-    dispose(): void {
-        // Clean up all effects
-        this._cleanupFns.forEach(cleanup => {
-            try {
-                cleanup();
-            } catch (err) {
-                console.error('Error during effect cleanup:', err);
+    derived<U>(fn: () => U): Signal<U> {
+        let cachedValue = fn();
+        const subscriptions = new Set<() => void>();
+
+        this.effect(() => {
+            const newValue = fn();
+            if (newValue !== cachedValue) {
+                cachedValue = newValue;
+                subscriptions.forEach(sub => { try { sub(); } catch (err) { console.error('Error in derived subscription:', err); } });
             }
         });
+
+        const derivedSignal: SignalInternal<U> = {
+            _subscriptions: subscriptions,
+            _cleanup: () => { subscriptions.clear(); },
+            get value() { if (subscriber !== null) subscriptions.add(subscriber); return cachedValue; },
+            set value(_: U) { console.warn('Cannot set value on derived signal'); }
+        };
+
+        this._signals.add(derivedSignal);
+        return derivedSignal;
+    }
+
+    dispose(): void {
+        this._cleanupFns.forEach(cleanup => { try { cleanup(); } catch (err) { console.error('Error during effect cleanup:', err); } });
         this._cleanupFns.clear();
+
+        this._signals.forEach(sig => { try { sig._cleanup(); } catch (err) { console.error('Error during signal cleanup:', err); } });
         this._signals.clear();
 
         super.dispose();
@@ -455,242 +577,124 @@ export abstract class DataMutable<T extends MutableWidget> extends ReactiveWidge
     abstract build(context: BuildContext): Widget;
 }
 
-export interface StateMutableParams<S extends string> {
-    init?: S;
-}
+export interface StateMutableParams<S extends string> { init?: S }
+export type EventArgs<P = void> = { payload: P; context: BuildContext }
+export type Transition<S extends string> = S | Promise<S>
+export type TransitionFn<S extends string> = () => Transition<S>
+export type EventHandler<S extends string, P = void> = (args: EventArgs<P>) => Transition<S>
+export type Middleware<S extends string, P = void> = (args: EventArgs<P>, next: (args: EventArgs<P>) => Transition<S>) => Transition<S>
+export type StateHandler<S extends string, Events extends Record<string, unknown>> =
+    | TransitionFn<S>
+    | Middleware<S, void>[]
+    | { [E in keyof Events]?: S | EventHandler<S, Events[E]> | Middleware<S, Events[E]>[] };
+export type States<S extends string, Events extends Record<string, unknown>> = { [K in S]: StateHandler<S, Events> };
+export type Widgets<S extends string> = Partial<Record<string, (args: { state: S, context: BuildContext }) => Widget>>;
 
-// Type-safe state machine types
-export type FunctionArgs<P> = {
-    payload: P
-}
-
-export type TransitionFunction<S extends string> = () => S | Promise<S>;
-
-export type TransitionFunction2<S extends string> = (
-    next: (args?: any) => S | Promise<S>,
-    args?: any
-) => S | Promise<S>;
-
-export type PayloadTransitionFn<S extends string, P> = (args: FunctionArgs<P>) => S | Promise<S>;
-
-export type MiddlewareTransitionFn<S extends string, P> = (
-    args: FunctionArgs<P>,
-    next: (args: FunctionArgs<P>) => S | Promise<S>
-) => S | Promise<S>;
-
-export type EventBasedTransitions<
-    S extends string,
-    E extends string,
-    Payloads extends Partial<Record<E, unknown>>
-> = {
-        [K in E]?:
-        | S
-        | (K extends keyof Payloads
-            ? PayloadTransitionFn<S, Payloads[K]>
-            : PayloadTransitionFn<S, undefined>)
-        | ReadonlyArray<
-            K extends keyof Payloads
-            ? MiddlewareTransitionFn<S, Payloads[K]>
-            : MiddlewareTransitionFn<S, undefined>
-        >;
-    };
-
-export type TransitionStates<
-    S extends string,
-    E extends string = string,
-    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
-> =
-    | EventBasedTransitions<S, E, Payloads>
-    | TransitionFunction<S>
-    | ReadonlyArray<TransitionFunction2<S>>;
-
-export type States<
-    S extends string,
-    E extends string,
-    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
-> = {
-        [K in S]: TransitionStates<S, E, Payloads>;
-    };
-
-export type Widgets<S extends string> = Partial<
-    Record<string, (args: { state: S }) => Widget>
->;
+type IsVoidLike<T> = T extends void | undefined | never ? true : false;
 
 export abstract class StateMutable<
     T extends MutableWidget,
     S extends string,
-    E extends string,
-    Payloads extends Partial<Record<E, unknown>> = Record<E, never>
+    Events extends Record<string, unknown> = Record<string, never>
 > extends ReactiveWidget<T> {
     state: S;
-    listeners: Partial<Record<E, Array<() => void>>> = {};
     private _rendering = false;
-    private _pendingState?: S;
+    private _pendingTransitions: S[] = [];
 
-    constructor(public widget: T, { init }: StateMutableParams<S> = {}) {
+    private _scheduledRender = false;
+
+    constructor(widget: T, params?: StateMutableParams<S>) {
         super(widget);
 
-        const stateKeys = Object.keys(
-            (() => {
-                try {
-                    return (this as any).states();
-                } catch {
-                    return {};
-                }
-            })()
-        );
+        const stateKeys = Object.keys((() => {
+            try { return (this as any).states(); } catch { return {}; }
+        })());
 
-        this.state = init ?? (stateKeys[0] as S);
+        this.state = (params?.init ?? stateKeys[0]) as S;
     }
 
-    abstract states(): States<S, E, Payloads>;
+    abstract states(): States<S, Events>;
     abstract build(context: BuildContext): Widgets<S>;
 
-    public subscribe(callbacks: Partial<Record<E, () => void>>): this {
-        for (const key in callbacks) {
-            const event = key as E;
-            const callback = callbacks[event];
-            if (callback) {
-                if (!this.listeners[event]) {
-                    this.listeners[event] = [];
-                }
-                this.listeners[event]!.push(callback);
-            }
-        }
-        return this;
+    public setState(state: S) {
+        this.state = state;
+        this.scheduleRender();
     }
 
-    public send<K extends E>(
-        event: K,
-        ...args: K extends keyof Payloads
-            ? Payloads[K] extends never
-            ? []
-            : [payload: Payloads[K]]
-            : []
+    private scheduleRender() {
+        if (this._scheduledRender) return;
+        this._scheduledRender = true;
+        Promise.resolve().then(() => {
+            this._scheduledRender = false;
+            try { this.widget.render(this.context, true); } catch (err) { console.error('Error in scheduled render:', err); }
+        });
+    }
+
+    public send<E extends keyof Events & string>(
+        event: E,
+        ...args: IsVoidLike<Events[E]> extends true ? [] | [payload?: Events[E]] : [payload: Events[E]]
     ): void {
-        const payload = args[0];
-        const states = this.states();
-        const handler = states[this.state];
+        const payload = args[0] as Events[E];
+        const handler = this.states()[this.state];
 
         if (!handler) return;
 
         try {
             if (typeof handler === 'function') {
-                const result = (handler as TransitionFunction<S>)();
-                this.resolveTransition(result, payload);
+                const result = (handler as TransitionFn<S>)();
+                this.handleTransition(result);
             } else if (Array.isArray(handler)) {
-                this.resolveMiddlewareChain(handler as ReadonlyArray<TransitionFunction2<S>>);
-            } else if (typeof handler === 'object') {
-                const eventHandler = (handler as EventBasedTransitions<S, E, Payloads>)[event];
+                this.runMiddlewareChain(handler, payload);
+            } else if (typeof handler === 'object' && handler !== null) {
+                const eventHandler = (handler as any)[event];
                 if (eventHandler !== undefined) {
-                    this.resolveTransition(eventHandler, payload);
+                    this.handleEventTransition(eventHandler, payload);
                 }
-            }
-
-            // Trigger listeners
-            const eventListeners = this.listeners[event];
-            if (eventListeners) {
-                eventListeners.forEach(cb => {
-                    try {
-                        cb();
-                    } catch (error) {
-                        console.error('Error in event listener:', error);
-                    }
-                });
             }
         } catch (error) {
-            console.error(
-                `Error handling event "${String(event)}" in state "${String(this.state)}":`,
-                error
-            );
+            console.error(`Error handling event "${event}" in state "${this.state}":`, error);
         }
     }
 
-    private resolveMiddlewareChain(
-        middleware: ReadonlyArray<TransitionFunction2<S>>,
-    ): void {
-        let index = 0;
-        const next = (args?: any) => {
-            if (index >= middleware.length) {
-                return this.state;
-            }
-            const fn = middleware[index++];
-            const result = fn(next, args);
-            return result;
-        };
-
-        const result = next(undefined);
-        this.resolveTransition(result, undefined);
-    }
-
-    private resolveTransition(
-        result: S | Promise<S> | PayloadTransitionFn<S, any> | ReadonlyArray<MiddlewareTransitionFn<S, any>>,
-        payload: any
-    ): void {
+    private handleTransition(result: Transition<S>): void {
         if (result instanceof Promise) {
-            result
-                .then(next => this.applyTransition(next))
-                .catch(error => console.error(`Async transition failed:`, error));
-            return;
-        }
-
-        if (Array.isArray(result)) {
-            // Middleware array for specific event
-            this.resolveEventMiddlewareChain(result, payload);
-            return;
-        }
-
-        if (typeof result === 'function') {
-            try {
-                const fnResult = (result as PayloadTransitionFn<S, any>)({ payload });
-                if (fnResult instanceof Promise) {
-                    fnResult
-                        .then(next => this.applyTransition(next))
-                        .catch(error => console.error(`Async transition function failed:`, error));
-                } else {
-                    this.applyTransition(fnResult);
-                }
-            } catch (error) {
-                console.error('Transition function threw an error:', error);
-            }
-            return;
-        }
-
-        this.applyTransition(result as S);
-    }
-
-    private resolveEventMiddlewareChain(
-        middleware: ReadonlyArray<MiddlewareTransitionFn<S, any>>,
-        payload: any
-    ): void {
-        let index = 0;
-        const next = (p: any): S | Promise<S> => {
-            if (index >= middleware.length) {
-                return this.state; // No more middleware
-            }
-            const fn = middleware[index++];
-            const result = fn({ payload: p }, next);
-            return result;
-        };
-
-        const result = next(payload);
-        if (result instanceof Promise) {
-            result
-                .then(nextState => this.applyTransition(nextState))
-                .catch(error => console.error(`Middleware chain failed:`, error));
+            result.then(next => this.applyTransition(next)).catch(error => console.error('Async transition failed:', error));
         } else {
             this.applyTransition(result);
         }
     }
 
-    private applyTransition(next: S): void {
-        if (!next || this.state === next) {
-            return;
+    private handleEventTransition(
+        handler: S | EventHandler<S, any> | Middleware<S, any>[],
+        payload: any
+    ): void {
+        if (typeof handler === 'string') {
+            this.applyTransition(handler);
+        } else if (typeof handler === 'function') {
+            const result = handler({ payload, context: this.context });
+            this.handleTransition(result);
+        } else if (Array.isArray(handler)) {
+            this.runMiddlewareChain(handler, payload);
         }
+    }
 
-        // Prevent re-render during render cycle
+    private runMiddlewareChain(middleware: Middleware<S, any>[], payload: any): void {
+        let index = 0;
+        const next = (args: EventArgs<any>): Transition<S> => {
+            if (index >= middleware.length) return this.state;
+            const fn = middleware[index++];
+            return fn(args, next);
+        };
+
+        const result = next({ payload, context: this.context });
+        this.handleTransition(result);
+    }
+
+    private applyTransition(next: S): void {
+        if (!next || this.state === next) return;
+
         if (this._rendering) {
-            this._pendingState = next;
+            this._pendingTransitions.push(next);
             return;
         }
 
@@ -698,14 +702,12 @@ export abstract class StateMutable<
         this._rendering = true;
 
         try {
-            this.widget.render(this.context, true);
+            this.scheduleRender();
         } finally {
             this._rendering = false;
 
-            // Apply any pending state change
-            if (this._pendingState && this._pendingState !== this.state) {
-                const pending = this._pendingState;
-                this._pendingState = undefined;
+            if (this._pendingTransitions.length > 0) {
+                const pending = this._pendingTransitions.shift()!;
                 this.applyTransition(pending);
             }
         }
@@ -717,36 +719,10 @@ export abstract class StateMutable<
             const handler = this.states()[this.state];
             if (typeof handler === 'function') {
                 try {
-                    const maybeResult = (handler as TransitionFunction<S>)();
-                    const next = maybeResult instanceof Promise ? await maybeResult : maybeResult;
-
-                    if (typeof next === 'function') {
-                        try {
-                            const fnResult = (next as any)();
-                            if (fnResult instanceof Promise) {
-                                const r = await fnResult;
-                                if (r && r !== this.state) {
-                                    this.applyTransition(r as S);
-                                    steps++;
-                                    continue;
-                                } else {
-                                    break;
-                                }
-                            } else if (fnResult && fnResult !== this.state) {
-                                this.applyTransition(fnResult as S);
-                                steps++;
-                                continue;
-                            } else {
-                                break;
-                            }
-                        } catch (err) {
-                            console.error(`Auto-step function transition failed:`, err);
-                            break;
-                        }
-                    }
-
+                    const result = (handler as TransitionFn<S>)();
+                    const next = result instanceof Promise ? await result : result;
                     if (next && next !== this.state) {
-                        this.applyTransition(next as S);
+                        this.applyTransition(next);
                         steps++;
                         continue;
                     }
@@ -757,111 +733,62 @@ export abstract class StateMutable<
             }
             break;
         }
-
-        if (steps >= maxSteps) {
-            console.warn(`Auto-step reached max steps (${maxSteps}) - possible infinite loop`);
-        }
+        if (steps >= maxSteps) console.warn(`Auto-step reached max steps (${maxSteps}) - possible infinite loop`);
     }
 
-    private findWidget(
-        widgets: Widgets<S>,
-        state: S
-    ): [((args: { state: S }) => Widget | null) | undefined, S | undefined] {
-        if (widgets[state]) {
-            return [widgets[state], state];
-        }
-
-        // pattern like "a|b|c"
+    private findWidget(widgets: Widgets<S>, state: S, context: BuildContext): Widget | null {
+        if (widgets[state]) return widgets[state]!({ state, context });
         for (const pattern in widgets) {
             if (pattern.includes('|')) {
                 const states = pattern.split('|').map(s => s.trim());
-                if (states.includes(state)) {
-                    return [widgets[pattern], state];
-                }
+                if (states.includes(state)) return widgets[pattern]!({ state, context });
             }
         }
-
-        // wildcard prefix "prefix.*"
         for (const pattern in widgets) {
             if (pattern.endsWith('.*')) {
                 const prefix = pattern.slice(0, -2);
-                if (state.startsWith(prefix)) {
-                    return [widgets[pattern], state];
-                }
+                if (state.startsWith(prefix)) return widgets[pattern]!({ state, context });
             }
         }
-
-        // regex style "/regex/"
         for (const pattern in widgets) {
             if (pattern.startsWith('/') && pattern.endsWith('/')) {
                 try {
                     const regex = new RegExp(pattern.slice(1, -1));
-                    if (regex.test(state)) {
-                        return [widgets[pattern], state];
-                    }
-                } catch (err) {
-                    console.warn(`Invalid widget regex pattern "${pattern}":`, err);
-                }
+                    if (regex.test(state)) return widgets[pattern]!({ state, context });
+                } catch (err) { console.warn(`Invalid widget regex pattern "${pattern}":`, err); }
             }
         }
-
-        if (widgets['*']) {
-            return [widgets['*'], state];
-        }
-
-        return [undefined, undefined];
+        if (widgets['*']) return widgets['*']({ state, context });
+        return null;
     }
 
-    render(context: BuildContext, widgets: Widgets<S>): HTMLElement {
+    render(context: BuildContext, widgets: Widgets<S>): Node {
         try {
-            const [widgetFactory, state] = this.findWidget(widgets, this.state);
-
-            if (state) this.state = state;
-
-            if (!widgetFactory) {
-                throw new Error(`No widget defined for state "${this.state}"`);
-            }
-
-            const widget = widgetFactory({ state: this.state });
-
-            if (!widget) {
-                throw new Error(`Widget factory returned null for state "${this.state}"`);
-            }
-
-            const element = widget.render(context);
-
+            const widget = this.findWidget(widgets, this.state, context);
+            if (!widget) throw new Error(`No widget defined for state "${this.state}"`);
+            const node = widget.render(context);
             this.autoStep();
-
-            return element;
+            return node;
         } catch (e) {
             console.error('Error rendering StateMutable:', e);
             throw e;
         }
     }
-
-    dispose(): void {
-        // Clear listeners
-        this.listeners = {};
-
-        super.dispose();
-    }
 }
 
-export abstract class InheritedWidget extends Widget {
-    name: string = "InheritedWidget";
 
-    constructor(public child: Widget, params: WidgetParams = {}) {
-        super(params);
-    }
+export abstract class InheritedWidget extends Widget {
+    name: string = 'InheritedWidget';
+    constructor(public child: Widget, params: WidgetParams = {}) { super(params); }
 
     abstract updateShouldNotify(old_widget: InheritedWidget): boolean;
 
-    render(context?: BuildContext): HTMLElement {
+    render(context: BuildContext): Node {
         const widgetContext = new BuildContext(this, context);
-        return this.child.render(widgetContext);
-    }
-
-    dispose(): void {
-
+        this._context = widgetContext;
+        const node = this.child.render(widgetContext);
+        this.elements = this.child.elements.slice();
+        return node;
     }
 }
+

@@ -6,35 +6,37 @@ interface ButtonParams {
 }
 
 export class Button extends ImmutableWidget {
-    private child: Widget;
+    name = "Button";
     onPressed?: () => void;
 
-    constructor(child: Widget, { onPressed, key }: ButtonParams = {}) {
+    constructor(
+        private child: Widget,
+        { onPressed, key }: ButtonParams = {}
+    ) {
         super({ key });
         this.child = child;
         this.onPressed = onPressed;
     }
 
     build(context: BuildContext): Widget {
-        return this;
-    }
+        const child = this.child;
+        const onPressed = this.onPressed;
 
-    render(context: BuildContext): HTMLElement {
-        const widgetContext = new BuildContext(this, context);
+        return new class extends Widget {
+            name = "ButtonBody";
 
-        const button = document.createElement('button');
+            render(ctx: BuildContext): Node {
+                const el = document.createElement('button');
 
-        if (this.onPressed) {
-            button.addEventListener('click', this.onPressed);
-        }
+                if (onPressed) {
+                    el.addEventListener('click', onPressed);
+                }
 
-        const childElement = this.child.render(widgetContext);
-        button.appendChild(childElement);
+                const childElement = child.render(ctx);
+                el.appendChild(childElement);
 
-        return this.setElement(button);
-    }
-
-    toString() {
-        return `Button("${this.child}")`;
+                return this.setElement(el);
+            }
+        }({ key: `${this.key}_body` });
     }
 }

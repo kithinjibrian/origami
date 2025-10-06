@@ -5,6 +5,8 @@ interface RowParams {
 }
 
 export class Row extends ImmutableWidget {
+    name = "Row";
+
     constructor(
         private children: Widget[],
         { key }: RowParams = {}
@@ -13,20 +15,23 @@ export class Row extends ImmutableWidget {
     }
 
     build(context: BuildContext): Widget {
-        return this;
-    }
+        const children = this.children;
 
-    render(context: BuildContext): HTMLElement {
-        const widgetContext = new BuildContext(this, context);
+        return new class extends Widget {
+            name = "RowBody";
 
-        const div = document.createElement('div');
-        div.style.display = 'flex';
-        div.style.flexDirection = 'row';
+            render(ctx: BuildContext): Node {
+                const el = document.createElement("div");
+                el.style.display = "flex";
+                el.style.flexDirection = "row";
 
-        this.children.forEach(child => {
-            div.appendChild(child.render(widgetContext));
-        });
+                for (const child of children) {
+                    const childEl = child.render(ctx);
+                    el.appendChild(childEl);
+                }
 
-        return this.setElement(div);
+                return this.setElement(el);
+            }
+        }({ key: `${this.key}_body` });
     }
 }
