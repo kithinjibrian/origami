@@ -1,12 +1,7 @@
-import { TextStyle } from "../painting/text_style";
+import { TextStyle } from "../painting/__init__";
 import { Reactive } from "../types/__init__";
-import { resolveReactive } from "../utils/__init__";
-import {
-    BuildContext,
-    DataMutable,
-    MutableWidget,
-    Widget
-} from "./framework";
+import { bind } from "../utils/__init__";
+import { BuildContext, DataWidget, MutableWidget, Widget } from "./framework";
 
 interface TextParams {
     style?: TextStyle
@@ -26,31 +21,45 @@ export class Text extends MutableWidget {
         this.style = style;
     }
 
-    createMutable(): DataMutable<this> {
+    createMutable(): DataWidget<this> {
         return new TextMutable(this);
     }
 }
 
-class TextMutable<T extends Text> extends DataMutable<T> {
-    constructor(widget: T) {
+class TextMutable<T extends Text> extends DataWidget<T> {
+    constructor(
+        widget: T
+    ) {
         super(widget);
     }
 
-    build(context: BuildContext): Widget {
-        throw new Error("Can't build leaf widget");
+    dispose(): void {
+        super.dispose();
     }
 
-    renderLeaf(context: BuildContext): HTMLElement {
-        const span = document.createElement('span');
+    build(_context: BuildContext): Widget {
+        let value = this.widget.value;
+        let style = this.widget.style;
+        let effect = this.effect;
 
-        this.effect(() => {
-            const v = resolveReactive(this.widget.value);
-            span.textContent = v!;
-        });
+        return new class extends Widget {
+            name: string = "Text"
+            anchor: Comment | null = null;
 
-        this.widget.style?.applyTo(span, (fn) => this.effect(fn));
+            render(_ctx: BuildContext): Node {
+                const span = document.createElement("span");
 
-        return span;
+                bind(
+                    span,
+                    "textContent",
+                    value,
+                    effect
+                );
+
+                style?.applyTo(span, effect);
+
+                return span;
+            }
+        }();
     }
-
 }

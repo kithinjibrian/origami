@@ -79,3 +79,20 @@ export class EdgeInsets {
         return `${this.top}px ${this.right}px ${this.bottom}px ${this.left}px`
     }
 }
+
+export namespace EdgeInsets {
+    export function applyEdgeInset(
+        element: HTMLElement,
+        edge: EdgeInsets | undefined,
+        property: "margin" | "padding"
+    ): void {
+        if (edge) {
+            if (property === "margin") {
+                element.style.margin = edge.toString();
+            } else if (property === "padding") {
+                element.style.margin = edge.toString();
+            }
+        }
+
+    }
+}

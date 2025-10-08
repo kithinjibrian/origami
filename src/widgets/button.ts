@@ -6,7 +6,6 @@ interface ButtonParams {
 }
 
 export class Button extends ImmutableWidget {
-    name = "Button";
     onPressed?: () => void;
 
     constructor(
@@ -24,6 +23,7 @@ export class Button extends ImmutableWidget {
 
         return new class extends Widget {
             name = "ButtonBody";
+            anchor: Comment | null = null;
 
             render(ctx: BuildContext): Node {
                 const el = document.createElement('button');
@@ -35,7 +35,7 @@ export class Button extends ImmutableWidget {
                 const childElement = child.render(ctx);
                 el.appendChild(childElement);
 
-                return this.setElement(el);
+                return el;
             }
         }({ key: `${this.key}_body` });
     }

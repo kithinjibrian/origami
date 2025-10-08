@@ -1,5 +1,4 @@
-import { Color } from "../../../main";
-import { Injectable } from "../../../widgets/__init__";
+import { Color } from "../../../painting/__init__";
 
 export enum ThemeMode {
     light,
@@ -63,7 +62,7 @@ export class ThemeData {
     }
 }
 
-@Injectable
+// @Injectable
 export class ThemeSettings {
     light!: ThemeData
     dark!: ThemeData

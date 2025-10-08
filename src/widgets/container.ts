@@ -6,11 +6,11 @@ interface ContainerParams {
     margin?: EdgeInsets;
     padding?: EdgeInsets;
     color?: Color;
+    width?: number;
+    height?: number;
 }
 
 export class Container extends ImmutableWidget {
-    name = "Container";
-
     constructor(
         private child: Widget,
         private params: ContainerParams = {}
@@ -19,31 +19,32 @@ export class Container extends ImmutableWidget {
     }
 
     build(context: BuildContext): Widget {
-        const { margin, padding, color } = this.params;
+        const { margin, padding, color, width, height } = this.params;
+
         const child = this.child;
 
         return new class extends Widget {
             name = "ContainerBody";
+            anchor: Comment | null = null;
 
             render(ctx: BuildContext): Node {
                 const el = document.createElement("div");
 
-                if (margin) {
-                    el.style.margin = margin.toString();
-                }
+                EdgeInsets.applyEdgeInset(el, margin, "margin")
+                EdgeInsets.applyEdgeInset(el, padding, "padding")
+                color?.applyColor(el, "bg");
 
-                if (padding) {
-                    el.style.padding = padding.toString();
+                if (typeof width === "number") {
+                    el.style.width = `${width}px`;
                 }
-
-                if (color) {
-                    el.style.backgroundColor = color.toString();
+                if (typeof height === "number") {
+                    el.style.height = `${height}px`;
                 }
 
                 const childEl = child.render(ctx);
                 el.appendChild(childEl);
 
-                return this.setElement(el) as Node;
+                return el;
             }
         }({ key: `${this.key}_body` });
     }

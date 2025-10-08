@@ -111,4 +111,13 @@ export class Color {
 
         return 0.2126 * r + 0.7152 * g + 0.0722 * b;
     }
+
+    applyColor(
+        element: HTMLElement,
+        property: "bg"
+    ): void {
+        if (property === "bg") {
+            element.style.backgroundColor = this.toString();
+        }
+    }
 }

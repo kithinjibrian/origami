@@ -1,4 +1,4 @@
-import { Color } from "../../../painting/__init__";
+import { Color } from "../../../painting/color";
 
 export class Colors {
     // Base
