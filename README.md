@@ -1,689 +1,155 @@
-# Origami Framework
+# Origami
 
-A reactive UI framework that combines the best ideas from Flutter's widget system, React's composition model, and fine-grained reactivity systems like SolidJS. Origami provides a declarative way to build web applications with explicit state machines, dependency injection, and efficient DOM updates.
+A TypeScript framework for building reactive web applications with explicit state machines and fine-grained reactivity.
 
-## Table of Contents
+## Overview
 
-- [Philosophy](#philosophy)
-- [Core Concepts](#core-concepts)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Widget Types](#widget-types)
-- [Reactivity System](#reactivity-system)
-- [State Machines](#state-machines)
-- [Dependency Injection](#dependency-injection)
-- [Comparison with Other Frameworks](#comparison-with-other-frameworks)
-- [Novel Solutions](#novel-solutions)
-- [Advanced Examples](#advanced-examples)
-- [Best Practices](#best-practices)
-- [API Reference](#api-reference)
-
-## Philosophy
-
-Origami is built on three core principles:
-
-1. **Explicit State Transitions**: State changes should be predictable and declarative through finite state machines
-2. **Fine-Grained Reactivity**: Only update what changed, without virtual DOM diffing
-3. **Flutter-Inspired Composition**: Widgets compose naturally with clear lifecycle management
+Origami is a lightweight UI framework that combines reactive programming with formal state machines to help developers write more predictable, maintainable applications. It emphasizes explicit state transitions, fine-grained reactivity through signals, and a component model that prevents common bugs found in modern frameworks.
 
 ## Core Concepts
 
-### Widgets
+### Widget System
 
-Everything in Origami is a widget. There are three main widget types:
+Origami uses three types of widgets:
 
-- **ImmutableWidget**: Stateless widgets that rebuild completely when their parent rebuilds
-- **MutableWidget**: Stateful widgets that manage their own state and lifecycle
-- **InheritedWidget**: Special widgets that propagate data down the widget tree
+- **ImmutableWidget**: Stateless components that rebuild completely on changes
+- **MutableWidget**: Stateful components with lifecycle management
+- **InheritedWidget**: Provides data down the widget tree (similar to React Context)
 
-### Build Context
+### Fine-Grained Reactivity
 
-Every widget receives a `BuildContext` that provides:
-- Access to ancestor widgets
-- Dependency injection container
-- Lifecycle management
-
-### Signals
-
-Fine-grained reactive primitives that automatically track dependencies and trigger updates only where needed.
-
-## Installation
-
-```bash
-npm install @kithinji/origami
-# or
-yarn add @kithinji/origami
-```
-
-## Quick Start
+Unlike React's coarse-grained re-rendering or Vue's template compilation, Origami uses a signal-based reactive system inspired by SolidJS and Svelte 5 runes:
 
 ```typescript
-import { ImmutableWidget, MutableWidget, DataWidget, BuildContext } from '@kithinji/origami';
+// Signals track dependencies automatically
+const count = this.signal(0);
 
-// Simple stateless widget
-class Greeting extends ImmutableWidget {
-  constructor(private name: string) {
-    super();
-  }
+// Effects run when dependencies change
+this.effect(() => {
+  console.log(`Count is now: ${count.value}`);
+});
 
-  build(context: BuildContext) {
-    return new Text(`Hello, ${this.name}!`);
-  }
-}
-
-// Stateful counter widget
-class Counter extends MutableWidget {
-  createMutable() {
-    return new CounterData(this);
-  }
-}
-
-class CounterData extends DataWidget<Counter> {
-  private count!: Signal<number>;
-
-  init() {
-    // Create a reactive signal
-    this.count = this.signal(0, 'count');
-
-    // Set up automatic DOM updates
-    this.effect(() => {
-      console.log(`Count changed to: ${this.count.value}`);
-    });
-  }
-
-  build(context: BuildContext) {
-    return new Column([
-      new Text(`Count: ${this.count.value}`),
-      new Button({
-        label: 'Increment',
-        onClick: () => this.count.value++
-      })
-    ]);
-  }
-}
-
-// Mount to DOM
-const app = new Counter();
-document.body.appendChild(app.render(new BuildContext(app)));
+// Derived signals compute from other signals
+const doubled = this.derived(() => count.value * 2);
 ```
 
-## Widget Types
+### StateWidget: Formal State Machines
 
-### ImmutableWidget
+The most innovative feature of Origami is **StateWidget**, which enforces formal state machine patterns at the framework level. This solves several critical problems that plague modern applications.
 
-Use for stateless components that don't need to manage their own state.
+## What Problems Does Origami Solve?
+
+### 1. Invalid State Transitions
+
+**The Problem**: In React, Vue, and Angular, state can be mutated arbitrarily. This leads to bugs where components enter impossible states:
 
 ```typescript
-class UserCard extends ImmutableWidget {
-  constructor(
-    private user: { name: string; email: string; avatar: string }
-  ) {
-    super({ debugLabel: 'UserCard' });
-  }
-
-  build(context: BuildContext) {
-    return new Container({
-      children: [
-        new Image({ src: this.user.avatar, alt: this.user.name }),
-        new Text(this.user.name),
-        new Text(this.user.email)
-      ]
-    });
-  }
-}
+// React - nothing prevents this invalid transition
+const [status, setStatus] = useState('idle');
+setStatus('error'); // Jump from idle directly to error?
+setStatus('loading'); // Can we load from error state?
 ```
 
-### MutableWidget with DataWidget
-
-Use when you need reactive state management.
+**Origami's Solution**: StateWidget enforces valid transitions at compile and runtime:
 
 ```typescript
-class TodoList extends MutableWidget {
-  createMutable() {
-    return new TodoListData(this);
-  }
-}
-
-class TodoListData extends DataWidget<TodoList> {
-  private todos!: Signal<Array<{ id: string; text: string; done: boolean }>>;
-  private filter!: Signal<'all' | 'active' | 'completed'>;
-
-  init() {
-    // Initialize reactive state
-    this.todos = this.signal([], 'todos');
-    this.filter = this.signal('all', 'filter');
-
-    // Derived signal - automatically updates when todos or filter changes
-    const filteredTodos = this.derived(() => {
-      const todos = this.todos.value;
-      const filter = this.filter.value;
-      
-      if (filter === 'active') return todos.filter(t => !t.done);
-      if (filter === 'completed') return todos.filter(t => t.done);
-      return todos;
-    }, 'filteredTodos');
-  }
-
-  private addTodo(text: string) {
-    // Signal updates are batched and efficient
-    this.todos.value = [
-      ...this.todos.value,
-      { id: crypto.randomUUID(), text, done: false }
-    ];
-  }
-
-  private toggleTodo(id: string) {
-    this.todos.value = this.todos.value.map(todo =>
-      todo.id === id ? { ...todo, done: !todo.done } : todo
-    );
-  }
-
-  build(context: BuildContext) {
-    const filtered = this.filteredTodos.value;
-    
-    return new Column([
-      new TodoInput({ onSubmit: (text) => this.addTodo(text) }),
-      new FilterButtons({ 
-        current: this.filter.value,
-        onChange: (f) => this.filter.value = f 
-      }),
-      ...filtered.map(todo => 
-        new TodoItem({
-          todo,
-          onToggle: () => this.toggleTodo(todo.id)
-        })
-      )
-    ]);
-  }
-}
-```
-
-### MutableWidget with StateWidget
-
-Use for complex state machines with explicit state transitions.
-
-```typescript
-// Define your states and events
-type FormState = 'editing' | 'validating' | 'submitting' | 'success' | 'error';
-
-type FormEvents = {
-  SUBMIT: { email: string; password: string };
-  RETRY: void;
-  RESET: void;
-};
-
-class LoginForm extends MutableWidget {
-  createMutable() {
-    return new LoginFormState(this, { init: 'editing' });
-  }
-}
-
-class LoginFormState extends StateWidget<LoginForm, FormState, FormEvents> {
-  private email!: Signal<string>;
-  private password!: Signal<string>;
-  private errorMessage!: Signal<string>;
-
-  init() {
-    this.email = this.signal('', 'email');
-    this.password = this.signal('', 'password');
-    this.errorMessage = this.signal('', 'errorMessage');
-  }
-
-  // Define allowed state transitions
+class LoadingStateMachine extends StateWidget<LoadingWidget, LoadingState> {
   states() {
     return {
-      editing: 'validating',
-      validating: ['editing', 'submitting'],
-      submitting: ['success', 'error'],
-      success: 'editing',
-      error: ['editing', 'submitting']
+      idle: 'loading',           // Can only go to loading
+      loading: ['success', 'error'], // Can go to success or error
+      success: 'idle',           // Can reset to idle
+      error: ['idle', 'loading'] // Can retry or reset
     };
   }
-
-  // Define what happens during transitions
-  transitions() {
-    return {
-      editing: {
-        SUBMIT: async ({ payload }) => {
-          // Validation logic
-          if (!payload.email || !payload.password) {
-            return 'editing';
-          }
-          return 'validating';
-        }
-      },
-      validating: async () => {
-        // Auto-transition after validation
-        await new Promise(resolve => setTimeout(resolve, 500));
-        return 'submitting';
-      },
-      submitting: async () => {
-        try {
-          // Simulated API call
-          const response = await fetch('/api/login', {
-            method: 'POST',
-            body: JSON.stringify({
-              email: this.email.value,
-              password: this.password.value
-            })
-          });
-          
-          if (response.ok) {
-            return 'success';
-          } else {
-            this.errorMessage.value = 'Invalid credentials';
-            return 'error';
-          }
-        } catch (err) {
-          this.errorMessage.value = 'Network error';
-          return 'error';
-        }
-      },
-      success: {
-        RESET: 'editing'
-      },
-      error: {
-        RETRY: 'submitting',
-        RESET: 'editing'
-      }
-    };
-  }
-
-  // Define UI for each state
-  build(context: BuildContext) {
-    return {
-      editing: ({ state, context }) => new Column([
-        new Input({
-          value: this.email.value,
-          onChange: (v) => this.email.value = v,
-          placeholder: 'Email'
-        }),
-        new Input({
-          value: this.password.value,
-          onChange: (v) => this.password.value = v,
-          placeholder: 'Password',
-          type: 'password'
-        }),
-        new Button({
-          label: 'Login',
-          onClick: () => this.send('SUBMIT', {
-            email: this.email.value,
-            password: this.password.value
-          })
-        })
-      ]),
-      
-      validating: ({ state, context }) => new Column([
-        new Spinner(),
-        new Text('Validating...')
-      ]),
-      
-      submitting: ({ state, context }) => new Column([
-        new Spinner(),
-        new Text('Logging in...')
-      ]),
-      
-      success: ({ state, context }) => new Column([
-        new Icon({ name: 'check', color: 'green' }),
-        new Text('Login successful!'),
-        new Button({
-          label: 'Done',
-          onClick: () => this.send('RESET')
-        })
-      ]),
-      
-      error: ({ state, context }) => new Column([
-        new Icon({ name: 'error', color: 'red' }),
-        new Text(this.errorMessage.value),
-        new Button({
-          label: 'Retry',
-          onClick: () => this.send('RETRY')
-        }),
-        new Button({
-          label: 'Back',
-          onClick: () => this.send('RESET')
-        })
-      ])
-    };
-  }
-}
-```
-
-## Reactivity System
-
-Origami uses fine-grained reactivity similar to SolidJS, but integrated with a Flutter-style widget system.
-
-### Signals
-
-```typescript
-class ReactiveExample extends DataWidget<SomeWidget> {
-  private counter!: Signal<number>;
-  private doubled!: Signal<number>;
-
-  init() {
-    // Basic signal
-    this.counter = this.signal(0, 'counter');
-
-    // Derived signal - automatically recomputes when dependencies change
-    this.doubled = this.derived(() => {
-      return this.counter.value * 2;
-    }, 'doubled');
-
-    // Effect - runs whenever dependencies change
-    this.effect(() => {
-      console.log(`Counter: ${this.counter.value}, Doubled: ${this.doubled.value}`);
-      
-      // Optional cleanup function
-      return () => {
-        console.log('Effect cleanup');
-      };
-    }, 'logger');
-  }
-
-  build(context: BuildContext) {
-    // Access signal values
-    return new Text(`${this.counter.value} × 2 = ${this.doubled.value}`);
-  }
-}
-```
-
-### Automatic Dependency Tracking
-
-Signals automatically track which effects depend on them:
-
-```typescript
-private setupReactivity() {
-  const firstName = this.signal('John');
-  const lastName = this.signal('Doe');
   
-  // This effect only re-runs when firstName changes
-  this.effect(() => {
-    console.log(`First: ${firstName.value}`);
-  });
-  
-  // This effect only re-runs when lastName changes
-  this.effect(() => {
-    console.log(`Last: ${lastName.value}`);
-  });
-  
-  // This effect re-runs when either changes
-  this.effect(() => {
-    console.log(`Full: ${firstName.value} ${lastName.value}`);
-  });
+  // Trying this.shift('error') from 'idle' will throw an error!
 }
 ```
 
-### Batched Updates
+### 2. Race Conditions in Async Operations
 
-Multiple signal updates are automatically batched:
+**The Problem**: Modern frameworks don't prevent race conditions when multiple async operations are triggered:
 
 ```typescript
-private updateUser() {
-  // These three updates trigger only ONE rebuild
-  this.firstName.value = 'Jane';
-  this.lastName.value = 'Smith';
-  this.age.value = 30;
+// React - classic race condition
+async function fetchUser(id) {
+  setLoading(true);
+  const data = await fetch(`/api/user/${id}`);
+  setUser(data); // What if another fetch started?
+  setLoading(false);
 }
 ```
 
-## State Machines
-
-State machines in Origami provide type-safe, predictable state management.
-
-### Pattern Matching
-
-The framework supports multiple pattern matching strategies:
+**Origami's Solution**: StateWidget's transition locking prevents concurrent state changes:
 
 ```typescript
-build(context: BuildContext) {
+transitions() {
   return {
-    // Exact match
-    'idle': ({ state }) => new IdleWidget(),
-    
-    // Multiple states (OR)
-    'loading|saving': ({ state }) => new LoadingWidget(state),
-    
-    // Prefix wildcard
-    'error.*': ({ state }) => new ErrorWidget(state),
-    
-    // Regex pattern
-    '/^fetch_[a-z]+$/': ({ state }) => new FetchWidget(state),
-    
-    // Fallback wildcard
-    '*': ({ state }) => new UnknownStateWidget(state)
+    loading: {
+      success: ({ payload }) => {
+        // If another transition is in progress, this queues
+        // Only the latest transition wins
+        return 'success';
+      },
+      error: ({ payload }) => 'error'
+    }
   };
 }
 ```
 
-### Transition Rules
+### 3. Implicit State Relationships
 
-Add validation to state transitions:
+**The Problem**: Related state variables can become desynchronized:
+
+```typescript
+// React - these can easily get out of sync
+const [isOpen, setIsOpen] = useState(false);
+const [isAnimating, setIsAnimating] = useState(false);
+const [hasError, setHasError] = useState(false);
+
+// What if isOpen=true, isAnimating=true, hasError=true?
+// Is that a valid state?
+```
+
+**Origami's Solution**: Single state machine with explicit states:
+
+```typescript
+states() {
+  return {
+    closed: 'opening',
+    opening: ['open', 'error'],
+    open: 'closing',
+    closing: ['closed', 'error'],
+    error: 'closed'
+  };
+}
+
+// Only one state at a time - impossible to be in contradictory states
+```
+
+### 4. Conditional Transitions with Rules
+
+StateWidget supports transition rules that other frameworks can't enforce:
 
 ```typescript
 states() {
   return {
     draft: {
-      next: ['reviewing', 'archived'],
+      next: ['published', 'archived'],
       rules: [
+        // Can only publish if content is valid
         (current, next) => {
-          // Only allow review if content is not empty
-          if (next === 'reviewing') {
-            return this.content.value.length > 0;
+          if (next === 'published') {
+            return this.validateContent();
           }
           return true;
         }
       ]
     },
-    reviewing: ['approved', 'rejected', 'draft'],
-    approved: 'published',
-    published: 'archived',
-    rejected: 'draft',
+    published: ['draft', 'archived'],
     archived: []
   };
-}
-```
-
-### Complex State Machine Example
-
-```typescript
-type AuthState = 
-  | 'unauthenticated'
-  | 'authenticating'
-  | 'authenticated'
-  | 'refreshing_token'
-  | 'token_expired'
-  | 'error';
-
-type AuthEvents = {
-  LOGIN: { username: string; password: string };
-  LOGOUT: void;
-  REFRESH: void;
-  TOKEN_EXPIRED: void;
-};
-
-class AuthManager extends StateWidget<AuthWidget, AuthState, AuthEvents> {
-  private token!: Signal<string | null>;
-  private user!: Signal<User | null>;
-
-  states() {
-    return {
-      unauthenticated: 'authenticating',
-      authenticating: ['authenticated', 'error'],
-      authenticated: ['refreshing_token', 'token_expired', 'unauthenticated'],
-      refreshing_token: ['authenticated', 'token_expired'],
-      token_expired: ['authenticating', 'unauthenticated'],
-      error: ['authenticating', 'unauthenticated']
-    };
-  }
-
-  transitions() {
-    return {
-      unauthenticated: {
-        LOGIN: async ({ payload }) => {
-          return 'authenticating';
-        }
-      },
-      authenticating: async () => {
-        try {
-          const response = await this.authenticate();
-          this.token.value = response.token;
-          this.user.value = response.user;
-          this.scheduleTokenRefresh();
-          return 'authenticated';
-        } catch (err) {
-          return 'error';
-        }
-      },
-      authenticated: {
-        LOGOUT: 'unauthenticated',
-        REFRESH: 'refreshing_token',
-        TOKEN_EXPIRED: 'token_expired'
-      },
-      refreshing_token: async () => {
-        try {
-          const newToken = await this.refreshToken(this.token.value!);
-          this.token.value = newToken;
-          return 'authenticated';
-        } catch (err) {
-          return 'token_expired';
-        }
-      },
-      token_expired: {
-        LOGIN: 'authenticating',
-        LOGOUT: 'unauthenticated'
-      },
-      error: {
-        LOGIN: 'authenticating',
-        LOGOUT: 'unauthenticated'
-      }
-    };
-  }
-
-  private scheduleTokenRefresh() {
-    // Schedule token refresh before expiry
-    setTimeout(() => {
-      if (this.getCurrentState() === 'authenticated') {
-        this.send('REFRESH');
-      }
-    }, 14 * 60 * 1000); // 14 minutes
-  }
-}
-```
-
-## Dependency Injection
-
-Origami provides a simple but powerful dependency injection system.
-
-### Providing Services
-
-```typescript
-// Define an injectable service
-@Injectable
-class UserService {
-  async fetchUser(id: string): Promise<User> {
-    const response = await fetch(`/api/users/${id}`);
-    return response.json();
-  }
-}
-
-@Injectable
-class AuthService {
-  private token: string | null = null;
-
-  setToken(token: string) {
-    this.token = token;
-  }
-
-  getToken(): string | null {
-    return this.token;
-  }
-}
-
-// Provide services at app root
-class App extends ImmutableWidget {
-  build(context: BuildContext) {
-    // Provide singleton instances
-    context.provide(UserService, new UserService());
-    context.provide(AuthService, new AuthService());
-    
-    // Or provide factory functions
-    context.provide(LoggerService, () => new LoggerService(context));
-
-    return new HomePage();
-  }
-}
-```
-
-### Consuming Services
-
-```typescript
-class UserProfile extends MutableWidget {
-  createMutable() {
-    return new UserProfileData(this);
-  }
-}
-
-class UserProfileData extends DataWidget<UserProfile> {
-  private user!: Signal<User | null>;
-
-  async init() {
-    this.user = this.signal(null, 'user');
-
-    // Read services from context
-    const userService = this.context.read(UserService);
-    const authService = this.context.read(AuthService);
-
-    // Use services
-    this.effect(async () => {
-      const token = authService.getToken();
-      if (token) {
-        const userData = await userService.fetchUser('current');
-        this.user.value = userData;
-      }
-    });
-  }
-
-  build(context: BuildContext) {
-    const user = this.user.value;
-    
-    if (!user) {
-      return new LoadingSpinner();
-    }
-
-    return new UserCard(user);
-  }
-}
-```
-
-### InheritedWidget for Theme/Config
-
-```typescript
-class ThemeData extends InheritedWidget {
-  constructor(
-    private theme: { primary: string; secondary: string },
-    child: Widget
-  ) {
-    super(child);
-  }
-
-  updateShouldNotify(oldWidget: ThemeData): boolean {
-    return this.theme !== (oldWidget as ThemeData).theme;
-  }
-
-  static of(context: BuildContext): ThemeData {
-    return context.dependOnInheritedWidgetOfExactTypeRequired(ThemeData);
-  }
-}
-
-// Usage
-class ThemedButton extends ImmutableWidget {
-  build(context: BuildContext) {
-    const theme = ThemeData.of(context);
-    
-    return new Button({
-      style: { backgroundColor: theme.primary }
-    });
-  }
 }
 ```
 
@@ -691,392 +157,387 @@ class ThemedButton extends ImmutableWidget {
 
 ### vs React
 
-| Feature | React | Origami |
-|---------|-------|---------|
-| **Reactivity** | Virtual DOM diffing | Fine-grained signals |
-| **State Management** | useState, useReducer, external libraries | Built-in signals and state machines |
-| **Updates** | Re-renders entire component tree | Only updates changed signals |
-| **State Machines** | External libraries (XState) | First-class support |
-| **Type Safety** | Good with TypeScript | Excellent with TypeScript |
-| **Learning Curve** | Moderate | Moderate-High |
+**React:**
+- Coarse-grained re-rendering (entire component tree)
+- Virtual DOM diffing overhead
+- No formal state management (relies on external libraries)
+- Hooks can cause closure stale state bugs
+
+**Origami:**
+- Fine-grained reactivity (only what changed updates)
+- Direct DOM manipulation
+- Built-in state machines prevent invalid states
+- Signals avoid closure issues
 
 ```typescript
-// React
-function Counter() {
-  const [count, setCount] = useState(0);
-  return <button onClick={() => setCount(count + 1)}>{count}</button>;
-}
+// React - can cause stale closure bugs
+useEffect(() => {
+  const timer = setInterval(() => {
+    setCount(count + 1); // count is stale!
+  }, 1000);
+}, []);
 
-// Origami
-class Counter extends MutableWidget {
-  createMutable() { return new CounterData(this); }
-}
-class CounterData extends DataWidget<Counter> {
-  private count = this.signal(0);
-  build() { return new Button({ onClick: () => this.count.value++ }); }
-}
+// Origami - signals always have current value
+this.effect(() => {
+  const timer = setInterval(() => {
+    count.value++; // Always current
+  }, 1000);
+});
 ```
 
-### vs SolidJS
+### vs Vue
 
-| Feature | SolidJS | Origami |
-|---------|---------|---------|
-| **Reactivity** | Fine-grained signals | Fine-grained signals |
-| **Widget System** | JSX components | Class-based widgets |
-| **State Machines** | Not built-in | First-class support |
-| **Lifecycle** | Simple | Explicit with BuildContext |
-| **Composition** | Function composition | Widget composition |
+**Vue:**
+- Template compilation adds build complexity
+- Options API mixes concerns
+- Composition API better but still no state machine enforcement
+- Proxy-based reactivity has performance edge cases
 
-```typescript
-// SolidJS
-function Counter() {
-  const [count, setCount] = createSignal(0);
-  return <button onClick={() => setCount(count() + 1)}>{count()}</button>;
-}
-
-// Origami - similar reactivity, different structure
-class CounterData extends DataWidget<Counter> {
-  private count = this.signal(0);
-  build() { return new Button({ label: this.count.value }); }
-}
-```
-
-### vs Flutter
-
-| Feature | Flutter | Origami |
-|---------|---------|---------|
-| **Widget System** | Widget tree | Widget tree |
-| **State Management** | setState, Provider, Bloc | Signals and state machines |
-| **Platform** | Mobile/Desktop | Web |
-| **Language** | Dart | TypeScript |
-| **Reactivity** | Full rebuilds | Fine-grained |
-
-```dart
-// Flutter
-class Counter extends StatefulWidget {
-  @override
-  _CounterState createState() => _CounterState();
-}
-class _CounterState extends State<Counter> {
-  int count = 0;
-  @override
-  Widget build(context) {
-    return Button(onPressed: () => setState(() => count++));
-  }
-}
-
-// Origami - similar structure, better reactivity
-class CounterData extends DataWidget<Counter> {
-  private count = this.signal(0);
-  build() { return new Button({ onClick: () => this.count.value++ }); }
-}
-```
+**Origami:**
+- Pure TypeScript, no compilation required
+- Class-based organization
+- StateWidget enforces state machine patterns
+- Signal-based reactivity is predictable
 
 ### vs Svelte
 
-| Feature | Svelte | Origami |
-|---------|---------|---------|
-| **Reactivity** | Compiler-based | Runtime signals |
-| **Syntax** | Template syntax | TypeScript classes |
-| **State Machines** | Not built-in | First-class support |
-| **Build Step** | Required (compiler) | Optional |
-| **Type Safety** | Good | Excellent |
+**Svelte:**
+- Compiler magic (disappearing framework)
+- Stores are simple but lack structure
+- No built-in state machine patterns
+- Excellent performance
 
-## Novel Solutions
+**Origami:**
+- Runtime framework with TypeScript
+- Explicit state machines
+- Similar fine-grained reactivity
+- Comparable performance
 
-### 1. State Machines as First-Class Citizens
+### vs SolidJS
 
-Most frameworks treat state machines as an afterthought, requiring external libraries like XState. Origami makes them a core primitive:
+**Solid** and **Origami** are the most similar. Both use:
+- Fine-grained signals
+- Direct DOM manipulation
+- Minimal re-rendering
+
+**Key Difference**: Origami adds StateWidget for formal state machine patterns, which Solid doesn't provide out of the box.
+
+## Complete Example: Form Wizard
 
 ```typescript
-// Complex async workflows are declarative and type-safe
-class DataFetcher extends StateWidget<Widget, FetchState, FetchEvents> {
-  states() {
-    return {
-      idle: 'fetching',
-      fetching: ['success', 'error'],
-      success: 'idle',
-      error: ['idle', 'fetching']
-    };
-  }
+import {
+  MutableWidget,
+  StateWidget,
+  BuildContext,
+  Widget,
+  ImmutableWidget
+} from '@kithinji/origami';
 
-  // Transitions handle the complexity
-  transitions() {
-    return {
-      idle: { FETCH: 'fetching' },
-      fetching: async () => {
-        try {
-          const data = await this.fetchData();
-          this.data.value = data;
-          return 'success';
-        } catch {
-          return 'error';
-        }
-      },
-      success: { REFETCH: 'fetching' },
-      error: { RETRY: 'fetching', CANCEL: 'idle' }
-    };
-  }
+// Define the form wizard states
+type WizardState = 'personal' | 'address' | 'review' | 'submitting' | 'success' | 'error';
+
+// Define events the wizard can handle
+interface WizardEvents {
+  next: void;
+  back: void;
+  submit: void;
+  retry: void;
 }
-```
 
-### 2. Flutter-Style Composition + Fine-Grained Reactivity
-
-Origami combines Flutter's intuitive widget composition with SolidJS-style reactivity:
-
-```typescript
-// No virtual DOM, no diffing, just surgical updates
-class TodoListData extends DataWidget<TodoList> {
-  private todos = this.signal<Todo[]>([]);
+// The wizard widget
+class FormWizard extends MutableWidget {
+  name = 'FormWizard';
   
-  build() {
-    // Only the changed todo item updates, not the entire list
-    return new Column(
-      this.todos.value.map(todo => 
-        new TodoItem({ 
-          todo,
-          // This specific item updates when toggled
-          onToggle: () => this.toggleTodo(todo.id)
-        })
-      )
-    );
-  }
-}
-```
-
-### 3. BuildContext as Dependency Injection Container
-
-Unlike React's Context (which triggers re-renders) or manual DI, Origami's BuildContext provides:
-
-```typescript
-// Services are scoped to widget subtrees
-class ParentWidget extends ImmutableWidget {
-  build(context: BuildContext) {
-    // Provide service at this level
-    context.provide(DataService, new DataService());
-    
-    return new ChildWidget(); // Can access DataService
+  createMutable() {
+    return new FormWizardState(this);
   }
 }
 
-// Child widgets access without prop drilling
-class ChildData extends DataWidget<ChildWidget> {
-  init() {
-    // Direct access, no props, no context drilling
-    const service = this.context.read(DataService);
-  }
-}
-```
-
-### 4. Explicit Widget Anchors
-
-Origami uses comment nodes as anchors for precise DOM updates:
-
-```typescript
-// Framework tracks exact insertion points
-// Enables efficient updates without virtual DOM
-private rebuild(newElement: Node) {
-  const anchor = this.widget.anchor;
-  const parent = anchor.parentNode;
+// The state machine logic
+class FormWizardState extends StateWidget<FormWizard, WizardState, WizardEvents> {
+  name = 'FormWizardState';
   
-  // Surgical replacement starting from anchor
-  let next = anchor.nextSibling;
-  while (next) {
-    parent.removeChild(next);
-    next = anchor.nextSibling;
-  }
-  parent.appendChild(newElement);
-}
-```
-
-### 5. Automatic Effect Cleanup
-
-Effects are tied to widget lifecycle:
-
-```typescript
-class SubscriptionWidget extends DataWidget<Widget> {
+  // Personal info signals
+  private firstName = this.signal('');
+  private lastName = this.signal('');
+  
+  // Address signals
+  private street = this.signal('');
+  private city = this.signal('');
+  
+  // Validation state
+  private errors = this.signal<string[]>([]);
+  
   init() {
-    // Effect automatically cleaned up when widget disposes
+    // Track validation in real-time
     this.effect(() => {
-      const subscription = someStream.subscribe(data => {
-        this.data.value = data;
-      });
+      const errs: string[] = [];
       
-      // Cleanup runs on effect disposal
-      return () => subscription.unsubscribe();
+      if (this.getCurrentState() === 'review') {
+        if (!this.firstName.value) errs.push('First name required');
+        if (!this.lastName.value) errs.push('Last name required');
+        if (!this.street.value) errs.push('Street required');
+        if (!this.city.value) errs.push('City required');
+      }
+      
+      this.errors.value = errs;
     });
   }
+  
+  // Define valid state transitions
+  states() {
+    return {
+      personal: 'address',
+      address: ['personal', 'review'],
+      review: {
+        next: ['address', 'submitting'],
+        rules: [
+          // Can only submit if no validation errors
+          (current, next) => {
+            if (next === 'submitting') {
+              return this.errors.value.length === 0;
+            }
+            return true;
+          }
+        ]
+      },
+      submitting: ['success', 'error'],
+      success: [],
+      error: 'review'
+    };
+  }
+  
+  // Handle events at each state
+  transitions() {
+    return {
+      personal: {
+        next: () => 'address'
+      },
+      address: {
+        next: () => 'review',
+        back: () => 'personal'
+      },
+      review: {
+        back: () => 'address',
+        submit: async () => {
+          // Async transition - framework handles race conditions
+          try {
+            await this.submitForm();
+            return 'success';
+          } catch (err) {
+            return 'error';
+          }
+        }
+      },
+      error: {
+        retry: () => 'review'
+      }
+    };
+  }
+  
+  private async submitForm(): Promise<void> {
+    // Simulate API call
+    await new Promise((resolve, reject) => {
+      setTimeout(() => {
+        Math.random() > 0.3 ? resolve(true) : reject(new Error('Network error'));
+      }, 2000);
+    });
+  }
+  
+  // Map states to widgets
+  build(context: BuildContext) {
+    return {
+      personal: () => new PersonalInfoStep(this.firstName, this.lastName, () => {
+        this.send('next');
+      }),
+      
+      address: () => new AddressStep(this.street, this.city, 
+        () => this.send('back'),
+        () => this.send('next')
+      ),
+      
+      review: () => new ReviewStep({
+        firstName: this.firstName.value,
+        lastName: this.lastName.value,
+        street: this.street.value,
+        city: this.city.value,
+        errors: this.errors.value,
+        onBack: () => this.send('back'),
+        onSubmit: () => this.send('submit')
+      }),
+      
+      submitting: () => new LoadingWidget('Submitting form...'),
+      
+      success: () => new SuccessWidget('Form submitted successfully!'),
+      
+      error: () => new ErrorWidget('Submission failed', () => this.send('retry'))
+    };
+  }
 }
+
+// Usage
+const wizard = new FormWizard();
+const root = document.getElementById('app')!;
+root.appendChild(wizard.render(new BuildContext(wizard)));
 ```
 
-## Best Practices
+## Key Features
 
-### 1. Use Appropriate Widget Types
+### 1. Automatic Dependency Tracking
 
 ```typescript
-// ✅ Good: Stateless = ImmutableWidget
-class UserAvatar extends ImmutableWidget {
-  build() { return new Image({ src: this.user.avatar }); }
-}
+const a = this.signal(1);
+const b = this.signal(2);
 
-// ✅ Good: Reactive state = DataWidget
-class Counter extends DataWidget {
-  private count = this.signal(0);
-  build() { return new Text(this.count.value); }
-}
+// Derived signals automatically track dependencies
+const sum = this.derived(() => a.value + b.value);
 
-// ✅ Good: Complex state = StateWidget
-class CheckoutFlow extends StateWidget {
-  states() { return { cart: 'shipping', shipping: 'payment' }; }
-}
+console.log(sum.value); // 3
+a.value = 5;
+console.log(sum.value); // 7 (automatically updated)
 ```
 
-### 2. Name Your Signals
+### 2. Batched Updates
 
 ```typescript
-// ✅ Good: Debug labels help track updates
-this.count = this.signal(0, 'count');
-this.user = this.signal(null, 'user');
+const count = this.signal(0);
 
 this.effect(() => {
-  console.log(this.count.value);
-}, 'count-logger');
+  console.log('Count:', count.value);
+});
+
+// These updates are batched - effect runs once
+count.value = 1;
+count.value = 2;
+count.value = 3;
+// Logs: "Count: 3" (only once)
 ```
 
-### 3. Scope Services Appropriately
+### 3. Effect Cleanup
 
 ```typescript
-// ✅ Good: App-level services at root
-class App extends ImmutableWidget {
-  build(context) {
-    context.provide(AuthService, new AuthService());
-    return new HomePage();
-  }
-}
-
-// ✅ Good: Feature services in feature root
-class UserProfilePage extends ImmutableWidget {
-  build(context) {
-    context.provide(UserProfileService, new UserProfileService());
-    return new UserProfile();
-  }
-}
+this.effect(() => {
+  const timer = setInterval(() => {
+    console.log('Tick');
+  }, 1000);
+  
+  // Return cleanup function
+  return () => clearInterval(timer);
+});
 ```
 
-### 4. Handle Errors Gracefully
-
-```typescript
-class SafeWidget extends DataWidget<Widget> {
-  private data = this.signal(null);
-  private error = this.signal(null);
-
-  async init() {
-    try {
-      const result = await fetchData();
-      this.data.value = result;
-    } catch (err) {
-      this.error.value = err;
-      this.logError('Failed to fetch data', err);
-    }
-  }
-
-  build(context: BuildContext) {
-    if (this.error.value) {
-      return new ErrorWidget(this.error.value);
-    }
-    return new DataWidget(this.data.value);
-  }
-}
-```
-
-### 5. Use Derived Signals for Computed Values
-
-```typescript
-// ✅ Good: Derived signal automatically updates
-private total = this.derived(() => {
-  return this.items.value.reduce((sum, item) => sum + item.price, 0);
-}, 'total');
-
-// ❌ Bad: Manual updates error-prone
-private updateTotal() {
-  this.total.value = this.items.value.reduce(...);
-}
-```
-
-## API Reference
-
-### Widget Classes
-
-#### `ImmutableWidget`
-Stateless widget that rebuilds completely when parent changes.
-
-```typescript
-abstract class ImmutableWidget extends Widget {
-  abstract build(context: BuildContext): Widget;
-}
-```
-
-#### `MutableWidget`
-Stateful widget with lifecycle management.
-
-```typescript
-abstract class MutableWidget extends Widget {
-  abstract createMutable(): Mutable<this, any>;
-}
-```
-
-#### `DataWidget<T>`
-Mutable widget with reactivity support.
-
-```typescript
-abstract class DataWidget<T extends MutableWidget> extends Mutable<T, Widget> {
-  signal<V>(value: V, debugLabel?: string): Signal<V>
-  derived<V>(fn: () => V, debugLabel?: string): Signal<V>
-  effect(fn: () => void | (() => void), debugLabel?: string): () => void
-  abstract build(context: BuildContext): Widget
-}
-```
-
-#### `StateWidget<T, S, E>`
-State machine widget with typed states and events.
-
-```typescript
-abstract class StateWidget<T, S extends string, E extends Record<string, unknown>> {
-  abstract states(): States<S>
-  transitions(): Transitions<S, E> | null
-  getCurrentState(): S
-  send<K extends keyof E>(event: K, payload: E[K]): void
-  protected shift(next: S): void
-  abstract build(context: BuildContext): Widgets<S>
-}
-```
-
-### BuildContext
-
-```typescript
-class BuildContext {
-  provide<T>(type: Type<T>, provider: Provider<T>): void
-  read<T>(type: Type<T>): T
-  dependOnInheritedWidgetOfExactType<T>(type: Type<T>): T | null
-  dispose(): void
-}
-```
-
-### Decorators
+### 4. Dependency Injection
 
 ```typescript
 @Injectable
-class MyService { }
+class UserService {
+  getUser(id: string) {
+    return fetch(`/api/users/${id}`);
+  }
+}
+
+class UserProfile extends ImmutableWidget {
+  build(context: BuildContext) {
+    // Inject service from context
+    const userService = context.read(UserService);
+    return new UserWidget(userService);
+  }
+}
+
+// Provide service at root
+const root = new BuildContext(rootWidget);
+root.provide(UserService, new UserService());
 ```
+
+### 5. Pattern Matching in State Widgets
+
+```typescript
+build(context: BuildContext) {
+  return {
+    // Exact match
+    'loading': () => new LoadingWidget(),
+    
+    // Multiple states (OR)
+    'success|complete': () => new SuccessWidget(),
+    
+    // Prefix match
+    'error.*': () => new ErrorWidget(),
+    
+    // Regex match
+    '/^step-\\d+$/': () => new StepWidget(),
+    
+    // Wildcard fallback
+    '*': () => new FallbackWidget()
+  };
+}
+```
+
+## When to Use Origami
+
+### Good Fit
+
+- **Forms and wizards** - StateWidget excels at multi-step processes
+- **Complex UI state** - Loading, error, success patterns
+- **Real-time applications** - Fine-grained reactivity is efficient
+- **Type-safe applications** - Full TypeScript support
+- **Small to medium apps** - Lightweight, no build tooling required
+
+### Not Ideal For
+
+- **Server-side rendering** - Currently client-only
+- **Large teams needing ecosystem** - Smaller community than React
+- **Apps requiring extensive third-party libraries** - Limited plugin ecosystem
+- **Progressive enhancement** - Requires JavaScript
+
+## Performance Characteristics
+
+1. **Fine-grained updates**: Only changed DOM nodes update
+2. **No virtual DOM**: Direct DOM manipulation
+3. **Batched reactivity**: Multiple signal changes trigger one update
+4. **Memory efficient**: Weak references prevent memory leaks
+5. **Small bundle size**: ~5KB minified + gzipped (core framework)
+
+## Installation
+
+```bash
+npm install @kithinji/origami
+```
+
+## Philosophy
+
+Origami believes that:
+
+1. **State machines should be first-class** - Most UI bugs come from invalid state transitions
+2. **Reactivity should be fine-grained** - Only what changed should update
+3. **Types catch bugs** - Full TypeScript integration, no template DSL
+4. **Explicit is better than magic** - Clear what happens when
+5. **Composition over configuration** - Build from primitives
+
+## Roadmap
+
+- [ ] Server-side rendering support
+- [ ] DevTools browser extension
+- [ ] Animation primitives
+- [ ] Router with state machine integration
+- [ ] Form validation helpers
+- [ ] Testing utilities
+- [ ] More examples and templates
 
 ## Contributing
 
-Contributions welcome! Please read our contributing guidelines and submit pull requests to our repository.
+Contributions welcome! Please read CONTRIBUTING.md for guidelines.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see LICENSE file for details
 
----
+## Acknowledgments
 
-Built with ❤️ for developers who value explicit state management and fine-grained reactivity.
+Origami draws inspiration from:
+- **SolidJS** - Fine-grained reactivity
+- **Svelte** - Disappearing framework philosophy  
+- **Flutter** - Widget composition patterns
+- **XState** - State machine patterns
+- **Elm** - The Elm Architecture
+
+The name "Origami" reflects the framework's philosophy: folding simple primitives (signals, widgets, state machines) into complex, beautiful applications.
