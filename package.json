@@ -15,8 +15,7 @@
         "type-check:watch": "tsc --noEmit -w"
     },
     "dependencies": {
-        "reflect-metadata": "^0.2.2",
-        "snabbdom": "^3.6.3"
+        "reflect-metadata": "^0.2.2"
     },
     "devDependencies": {
         "@types/reflect-metadata": "^0.0.5",
